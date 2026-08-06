@@ -22,6 +22,11 @@ uv.lock.tmp/
 .coverage.*
 htmlcov/
 
+# omigamax runtime artifacts
+logs/
+checkpoints/
+*.npz
+
 # Jupyter / notebooks
 .ipynb_checkpoints/
 

@@ -1,0 +1,40 @@
+# omigamax default configuration (AlphaGo Zero baseline, b10c128 on a 6GB GPU).
+# All keys referenced by later todos are defined here; values are overridable
+# at runtime by passing a different YAML path to omigamax.config.load_config.
+
+# Board and game
+board_size: 19
+komi: 7.5
+resign_threshold: 0.0
+
+# Network (ResNet policy-value, AGZ-style 17-plane input)
+blocks: 10
+channels: 128
+fp16: false
+
+# MCTS search
+c_puct: 2.5
+dirichlet_alpha: 0.03
+dirichlet_eps: 0.25
+temperature_threshold: 30
+virtual_loss: 3
+simulations: 200
+leaf_batch: 16
+
+# Training
+batch_size: 128
+lr: 0.2
+momentum: 0.9
+l2: 1e-4
+lr_schedule_steps: [50000, 100000]
+replay_buffer_games: 1000
+symmetry_aug: true
+
+# Evaluation gate
+eval_interval_steps: 2000
+eval_games: 21
+eval_sims: 200
+replace_threshold: 0.55
+
+# Visualization
+viz_enabled: true

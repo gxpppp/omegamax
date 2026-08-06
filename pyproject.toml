@@ -1,10 +1,11 @@
 [project]
-name = "betamaster"
+name = "omigamax"
 version = "0.1.0"
-description = "Add your description here"
+description = "omigamax: a from-scratch AlphaGo Zero Go engine"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy",
     "pygame>=2.6.1",
     "pytest>=9.1.1",
     "pyyaml>=6.0.3",
@@ -14,8 +15,12 @@ dependencies = [
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cu130"]
 
-[project.scripts]
-betamaster = "betamaster:main"
+[tool.uv.build-backend]
+module-name = "omigamax"
+module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["uv_build>=0.12.2,<0.13.0"]
