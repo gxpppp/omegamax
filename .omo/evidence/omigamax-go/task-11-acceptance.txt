@@ -1,0 +1,40 @@
+﻿=== todo-11 acceptance commands (2026-08-07T03:06:33) ===
+
+--- A1: uv run pytest -q ---
+........................................................................ [ 46%]
+........................................................................ [ 92%]
+...........                                                              [100%]
+155 passed in 7.10s
+exit_code=0
+
+--- A2: uv run python -m omigamax.cli.smoke_net --mcts-sims 200 --compare-per-leaf ---
+=== omigamax smoke_net --mcts-sims (todo 11 baseline) ===
+device: NVIDIA GeForce RTX 3060 Laptop GPU
+simulations=200 leaf_batch=16 seed=0
+batched:  wall_time_s=1.36 sims/s=147.4 forwards=39 avg_batch_size=5.1 peak_GB=0.0349
+per-leaf: wall_time_s=1.68 sims/s=119.3 peak_GB=0.0215
+speedup vs per-leaf: 1.24x
+root visits: 200 (policy_sum=1.000000)
+RESULT: PASS (baseline recorded)
+exit_code=0
+
+--- A3: uv run python -m omigamax.cli.smoke_net --mcts-sims 800 ---
+=== omigamax smoke_net --mcts-sims (todo 11 baseline) ===
+device: NVIDIA GeForce RTX 3060 Laptop GPU
+simulations=800 leaf_batch=16 seed=0
+batched:  wall_time_s=5.16 sims/s=155.1 forwards=153 avg_batch_size=5.2 peak_GB=0.0349
+root visits: 800 (policy_sum=1.000000)
+RESULT: PASS (baseline recorded)
+exit_code=0
+
+--- A4: uv run python .omo/evidence/omigamax-go/task-11-demo.py ---
+=== todo-11 evidence: batched leaf evaluation ===
+[forward equivalence] leaves=16 forwards=1 max_prior_diff=3.725e-09 max_value_diff=4.657e-10 equal_within_float32=True
+[search equivalence batch_size=1] True
+[determinism] True
+[memory gate] peak_GB=0.0349 (200 sims, 19x19, leaf_batch=16) under_5GB=True
+[timing 200 sims] batched: 145.5 sims/s (1.37s, avg_batch=13.3); per-leaf: 122.1 sims/s (1.64s); speedup 1.19x
+[timing 800 sims] batched: 153.3 sims/s (5.22s)
+evidence written: E:\AAAhuancun\betamaster\.omo\evidence\omigamax-go\task-11-batch.json
+RESULT: PASS
+exit_code=0

@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "device": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "seed": 0,
+  "mode": "mcts-baseline",
+  "simulations": 200,
+  "batched": {
+    "mode": "batched",
+    "simulations": 200,
+    "leaf_batch": 16,
+    "wall_time_s": 1.3748336999997264,
+    "sims_per_sec": 145.47213964862792,
+    "peak_GB": 0.03488588333129883,
+    "root_visits": 200,
+    "policy_sum": 1.0,
+    "forwards": 28,
+    "avg_batch_size": 7.142857142857143
+  },
+  "per_leaf": {
+    "mode": "per-leaf",
+    "simulations": 200,
+    "leaf_batch": 1,
+    "wall_time_s": 1.6787137999926927,
+    "sims_per_sec": 119.1388311699532,
+    "peak_GB": 0.02146005630493164,
+    "root_visits": 200,
+    "policy_sum": 1.0
+  },
+  "wall_time_s": 1.3748336999997264,
+  "sims_per_sec": 145.47213964862792,
+  "speedup_vs_per_leaf": 0.8189804003551474
+}

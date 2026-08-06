@@ -55,9 +55,18 @@ Design seams for later todos:
 
 * the ``evaluator`` interface ``callable(node) -> (prior_probs, value)`` --
   todo 11 swaps the per-leaf synchronous
-  :class:`NetworkEvaluator` for a batched one with the same contract;
+  :class:`NetworkEvaluator` for the batched :class:`BatchedNetworkEvaluator`
+  (``submit``/``flush`` protocol; the default when ``run_search``/``MCTS`` is
+  given a plain ``network``), behind the same ``(node) -> (prior, value)``
+  contract for batch-size-1 use;
 * ``Node.virtual_loss`` and ``Node.noisy_prior`` -- consumed only by
   ``select_child``; everything else in this module treats them as opaque.
+
+Todo 11 (batched leaf evaluation) works through the virtual-loss seam: the
+search loop collects up to ``leaf_batch`` leaves -- each claimed with
+``virtual_loss`` while in flight, which depresses them in UCB and spreads
+selection across distinct branches -- then evaluates the whole batch in a
+single forward and expands/backs-up every leaf. See :func:`run_search`.
 
 Structure of the module:
 
@@ -85,6 +94,7 @@ import numpy as np
 import torch
 
 from omigamax.config import load_config
+from omigamax.mcts.batched_evaluator import DEFAULT_LEAF_BATCH, BatchedNetworkEvaluator
 from omigamax.network.features import (
     HISTORY_STEPS,
     decode_policy,
@@ -373,6 +383,7 @@ def run_search(
     dirichlet_eps: float | None = None,
     dirichlet_rng: np.random.Generator | None = None,
     virtual_loss: int | None = None,
+    batch_size: int | None = None,
 ) -> Node:
     """Run ``simulations`` full MCTS passes from ``root`` (in place).
 
@@ -380,12 +391,17 @@ def run_search(
         root: the search root (see :func:`make_root`).
         network: the policy-value network used for leaf evaluation. Ignored
             when ``evaluator`` is given (the todo-11 batch seam); required
-            otherwise.
+            otherwise. When a plain ``network`` is used the leaves are
+            evaluated by a batched :class:`BatchedNetworkEvaluator` (todo 11)
+            with the config's ``leaf_batch``.
         simulations: number of selection/expansion/backup passes.
         c_puct: UCB exploration constant (default ``config c_puct`` = 2.5).
         komi: komi used for terminal scoring (default ``config komi`` = 7.5).
-        evaluator: pluggable leaf evaluator ``(node) -> (prior, value)``;
-            defaults to a per-leaf :class:`NetworkEvaluator`.
+        evaluator: pluggable leaf evaluator. A per-leaf callable
+            ``(node) -> (prior, value)`` runs the todo-9 synchronous path. A
+            batched evaluator (has ``submit``/``flush``, e.g.
+            :class:`BatchedNetworkEvaluator`) runs the todo-11 collect-then-
+            flush path -- the default when ``evaluator`` is None.
         dirichlet_alpha: AGZ root-noise concentration. When ``None`` (the
             default) no noise is applied and any stale override is cleared;
             otherwise ``apply_dirichlet_noise(root, dirichlet_alpha,
@@ -396,12 +412,29 @@ def run_search(
             = 0.25, used only when ``dirichlet_alpha`` is given).
         dirichlet_rng: numpy generator for the noise draw.
         virtual_loss: virtual-loss value claimed on a leaf while it is being
-            evaluated (default ``config virtual_loss`` = 3; 0 disables). The
-            claim is released immediately after evaluation (``try/finally``),
-            so the final visit counts and policy are exact.
+            evaluated (default ``config virtual_loss`` = 3; 0 disables). With
+            a batched evaluator every leaf of the in-flight batch carries the
+            claim while the batch is pending (spreading selection across
+            distinct branches) and the claim is released after the batch's
+            flush (``try/finally``), so the final visit counts and policy are
+            exact.
+        batch_size: leaves collected before one network forward (todo 11).
+            ``None`` uses ``config leaf_batch`` = 16 for a batched evaluator
+            (and the synchronous path when the evaluator is a per-leaf
+            callable). ``1`` degenerates to exact per-leaf evaluation.
 
     Returns:
         ``root``, with updated visit statistics.
+
+    Batched evaluation (todo 11): instead of evaluating one leaf per forward
+    pass, the loop collects up to ``batch_size`` leaves -- each virtual-loss
+    claimed on submission -- then flushes them through a single forward
+    (``evaluator.flush()``), expands every leaf with its batch prior, releases
+    every claim and backs up every path. Selection never descends through an
+    unexpanded leaf, so an already-pending leaf can only be re-selected when
+    every reachable leaf is pending: the batch is flushed then and the
+    selection is retried (no simulation is consumed). The final batch -- the
+    tail, with fewer than ``batch_size`` leaves -- is flushed after the loop.
     """
     cfg = load_config()
     if c_puct is None:
@@ -415,6 +448,14 @@ def run_search(
             raise ValueError("either `network` or `evaluator` must be provided")
         evaluator = NetworkEvaluator(network)
 
+    # -- todo-11 batch wiring: detect a batched evaluator, pick batch size --
+    batched = hasattr(evaluator, "submit") and hasattr(evaluator, "flush")
+    if batch_size is None:
+        batch_size = (
+            int(cfg.get("leaf_batch", DEFAULT_LEAF_BATCH)) if batched else 1
+        )
+    batch_size = max(1, int(batch_size))
+
     # -- AGZ Dirichlet root noise: applied once, before the simulations --
     if dirichlet_alpha is not None:
         alpha = float(dirichlet_alpha)
@@ -427,7 +468,47 @@ def run_search(
     else:
         root.noisy_prior = None  # never let stale noise leak into a fresh run
 
-    for _ in range(int(simulations)):
+    # Pending (in-flight) batch: (leaf, path from root to leaf). The batch is
+    # flushed whenever it reaches batch_size, on re-selecting an already
+    # pending leaf (nothing new to explore below it until it expands), and at
+    # the very end (tail batch).
+    pending: list[tuple[Node, list[Node]]] = []
+
+    def flush_batch() -> None:
+        """Run one batched forward over ``pending``, expand + backup each leaf.
+
+        Virtual-loss claims on every batch member are released in ``finally``
+        so an evaluator failure can never leak a claim.
+        """
+        if not pending:
+            return
+        try:
+            results = evaluator.flush()
+            if len(results) != len(pending):
+                raise RuntimeError(
+                    f"batched evaluator returned {len(results)} results for "
+                    f"{len(pending)} submitted leaves"
+                )
+            for (node, path), (fnode, prior, value) in zip(pending, results):
+                if fnode is not node:
+                    raise RuntimeError(
+                        "batched evaluator returned a leaf in a different "
+                        "order than submitted"
+                    )
+                expand(node, prior)
+                # -- backup: negate the perspective at every level --
+                v = float(value)
+                for visited in reversed(path):
+                    visited.visit_count += 1
+                    visited.value_sum += v
+                    v = -v
+        finally:
+            for node, _ in pending:
+                node.virtual_loss -= virtual_loss
+            pending.clear()
+
+    sims_done = 0
+    while sims_done < int(simulations):
         # -- selection: descend until an unexpanded leaf --
         node = root
         path = [root]
@@ -435,29 +516,53 @@ def run_search(
             _, node = select_child(node, c_puct)
             path.append(node)
 
-        # -- expansion (skipped for terminal positions) --
+        # -- terminal leaves never go through the evaluator --
         if node.legal_moves is None:
             node.legal_moves = legal_actions(node.board)
         if node.board.is_terminal():
             value = terminal_value(node.board, komi)
-        else:
-            # -- virtual-loss claim: the leaf is "in evaluation" (todo 11
-            #    batches exactly here). select_child divides by
-            #    1 + N_child + virtual_loss, so the claimed leaf is depressed
-            #    for any concurrent selection; released in `finally` so the
-            #    backup below records exact visit counts. --
+            for visited in reversed(path):
+                visited.visit_count += 1
+                visited.value_sum += value
+                value = -value
+            sims_done += 1
+            if batched and len(pending) >= batch_size:
+                flush_batch()
+            continue
+
+        if not batched:
+            # -- per-leaf synchronous path (todo 9/10): claim, evaluate,
+            #    expand, release -- bit-identical to the original loop. --
             node.virtual_loss += virtual_loss
             try:
                 prior, value = evaluator(node)
                 expand(node, prior)
             finally:
                 node.virtual_loss -= virtual_loss
+            for visited in reversed(path):
+                visited.visit_count += 1
+                visited.value_sum += value
+                value = -value
+            sims_done += 1
+            continue
 
-        # -- backup: accumulate along the path, negating the perspective --
-        for visited in reversed(path):
-            visited.visit_count += 1
-            visited.value_sum += value
-            value = -value
+        # -- re-selecting an already-pending leaf: flush to free it --
+        if any(pn is node for pn, _ in pending):
+            if pending:
+                flush_batch()
+            continue  # no simulation consumed; retry selection on the new tree
+
+        # -- expandable leaf: claim virtual loss and submit to the batch --
+        node.virtual_loss += virtual_loss
+        evaluator.submit(node)
+        pending.append((node, path))
+        sims_done += 1
+        if len(pending) >= batch_size:
+            flush_batch()
+
+    # -- tail batch: fewer than batch_size leaves pending at the end --
+    if batched and pending:
+        flush_batch()
 
     return root
 
