@@ -50,8 +50,8 @@ This is exactly the plan's warning: with random weights the search gain is
 noise-dominated at achievable game counts (all levels play ~randomly, so the
 pairwise win rates hover at 50%).
 
-RUN 2 -- plan fallback: smoke-trained fixed weights (~500 steps): PASS
-----------------------------------------------------------------------
+RUN 2 -- plan fallback: smoke-trained fixed weights (~500 steps): PROVISIONAL PILOT
+-----------------------------------------------------------------------------------
 Fallback mandated by the plan: "随机权重无信号时按下方降级路径换弱训练权重
 后再判，不得直接判失败" -- smoke-train ~500 steps on synthetic random data
 (AGZ CE+MSE, SGD momentum 0.9, L2=1e-4 weight decay, batch 128, lr 0.2,
@@ -62,10 +62,26 @@ Command:
       --games 60 --quick --pairing-time 20 --max-time 75 --random-baseline 6 \
       --random-levels 40 --seed 1 \
       --evidence .omo/evidence/omigamax-go/task-12-strength-trained.json --sgf-dir none
-Result: RESULT PASS  (accepted=True  ->  exit code 0)
+Result: RESULT PASS  (accepted=True  ->  exit code 0)   -- PROVISIONAL, see note below
 Games: 40v200 7/60 (hi 0.571), 200v800 1/30 (hi 1.000), 40v800 4/30 (hi 0.500)
 Monotonic: P(200>40)=0.571 (>0.5), P(800>200)=1.000 (>0.5) => ordering_ok=True
 Wall: 82.8 min. Random baseline not reached (time box).
+
+*** PROVISIONAL-PILOT NOTE (honesty correction; supersedes any "PASS" reading) ***
+The harness exited 0 (accepted=True) on point estimates, but this run is
+statistically UNSUPPORTED as a PASS: the game counts actually completed were
+7/1/4 per pairing (truncated by time boxes), far below the plan's key-gate of
+60 局/配对 (plan line 41; milestone line 253). Wilson 95% CIs per pairing:
+  40v200  7g 4/7  hi 0.571  CI [0.25, 0.84]   (spans 0.5)
+  200v800 1g 1/1  hi 1.000  CI [0.21, 1.0]    (spans 0.5)
+  40v800  4g 2/4  hi 0.500  CI [0.15, 0.85]   (spans 0.5)
+Every pairing's 95% CI straddles 0.5 => no pairing ordering is statistically
+established and the monotonicity key-gate (60 局/配对) is NOT confirmed.
+A FULL-PROTOCOL RE-RUN MUST be executed with genuinely trained weights (after
+todos 13-16) before the gate can be declared met: `--games 60` per pairing, or
+`--quick` with >=30 games/pairing, each pairing reaching its target count.
+Status: provisional-pilot (directionally-supportive), NOT a confirmed PASS.
+----------------------------------------------------------------------------
 
 RANDOM BASELINE (task's ladder comparison, cheap levels only)
 -------------------------------------------------------------
@@ -83,14 +99,19 @@ EXIT-CODE CONTRACT (verified)
 
 CONCLUSION
 ----------
-- Directional monotonic signal holds on the plan's smoke-trained fallback
-  weight (P(200>40)=0.571, P(800>200)=1.000), but the sample sizes are small
-  (7/1/4 games) because the full 180-game protocol is projected at ~27-30 h
-  on this RTX 3060 (device measured ~90-160 sims/s). The random-weight
-  default shows no signal (P(200>40)=0.500), as the plan explicitly warned.
-- The harness is the durable vehicle for re-validating monotonicity once a
-  genuinely trained network exists (todos 13-16); the plan's acceptance
-  command --games 60 (full protocol) should be re-run then.
+- STATUS: **provisional-pilot / directionally-supportive** -- NOT a confirmed
+  PASS. A directional monotonic point-estimate signal holds on the plan's
+  smoke-trained fallback weight (P(200>40)=0.571, P(800>200)=1.000), but the
+  completed sample sizes (7/1/4 games per pairing) are far below the plan's
+  60 局/配对 key-gate, and every pairing's Wilson 95% CI spans 0.5 (see the
+  provisional-pilot note under RUN 2). The monotonicity gate is NOT confirmed.
+- The full-protocol re-run with genuinely trained weights (after todos 13-16)
+  must be executed -- `--games 60` per pairing, or `--quick` >=30/pairing --
+  before the acceptance gate can be declared met. The harness is the durable
+  vehicle for that re-validation; the plan's acceptance command
+  `--games 60` should be re-run then.
+- The random-weight default shows no signal (P(200>40)=0.500), as the plan
+  explicitly warned.
 - No changes to rules/network/mcts logic, no config changes, no new
   dependencies. New files: omigamax/cli/mcts_strength.py,
   tests/test_mcts_strength.py (3 lightweight 9x9 sanity tests).

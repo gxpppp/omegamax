@@ -25,6 +25,7 @@ htmlcov/
 # omigamax runtime artifacts
 logs/
 checkpoints/
+models/
 *.npz
 
 # Jupyter / notebooks

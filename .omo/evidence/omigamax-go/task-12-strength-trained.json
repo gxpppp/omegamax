@@ -2,6 +2,44 @@
   "todo": 12,
   "device": "cuda",
   "weight_source": "loaded from models/todo12-fixed-weights.pt",
+  "status": "provisional-pilot",
+  "verdict": "PROVISIONAL / directionally-supportive pilot only. NOT a confirmed PASS. Every pairing's Wilson 95% CI spans 0.5, so no pairing ordering is statistically established and the monotonicity key-gate (plan line 41 / 253: 60 局/配对) is NOT confirmed by this run.",
+  "statistical_power": {
+    "ci_method": "Wilson 95% interval (two-sided, z=1.96)",
+    "note": "All sample sizes far below the plan's 60-games-per-pairing key-gate; every 95% CI straddles 0.5, so the win-rate matrix cannot statistically distinguish the levels. Directional point estimates only.",
+    "pairings": {
+      "40v200": {
+        "games": 7,
+        "hi_wins": 4,
+        "hi_winrate": 0.571,
+        "wilson_95_ci": [
+          0.25,
+          0.84
+        ]
+      },
+      "200v800": {
+        "games": 1,
+        "hi_wins": 1,
+        "hi_winrate": 1.0,
+        "wilson_95_ci": [
+          0.21,
+          1.0
+        ]
+      },
+      "40v800": {
+        "games": 4,
+        "hi_wins": 2,
+        "hi_winrate": 0.5,
+        "wilson_95_ci": [
+          0.15,
+          0.85
+        ]
+      }
+    },
+    "monotonicity_key_gate_confirmed": false,
+    "plan_gate_reference": "plan line 41 / line 253: todo 12 '60 局/配对'"
+  },
+  "required_rerun": "A full-protocol re-run with genuinely trained weights (after todos 13-16) MUST be executed before the plan's acceptance gate can be declared met: `uv run python -m omigamax.cli.mcts_strength --games 60` (or `--quick` with >=30 games/pairing), each pairing reaching its target game count. This pilot only demonstrates directional support on the smoke-trained fallback weight; it is not acceptance evidence.",
   "protocol": {
     "levels": [
       40,
