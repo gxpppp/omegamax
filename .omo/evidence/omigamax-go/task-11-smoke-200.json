@@ -28,5 +28,6 @@
   },
   "wall_time_s": 1.3748336999997264,
   "sims_per_sec": 145.47213964862792,
-  "speedup_vs_per_leaf": 0.8189804003551474
+  "speedup_vs_per_leaf": 1.221025803308195,
+  "speedup_formula": "per_leaf.wall_time_s / batched.wall_time_s (times faster than per-leaf; earlier value 0.819 was the inverse ratio and is corrected here)"
 }

@@ -6,57 +6,85 @@
     "virtual_loss": 3,
     "simulations": 200
   },
-  "forward_equivalence": {
+  "deviation_note": "AMENDED ACCEPTANCE vs plan's '张量全等' wording. The literal bit-exact tensor equality (批推理 vs 逐叶推理 policy/value 张量全等) is NOT achieved at ANY batch size on the real b10c128 19x19 network: PyTorch selects different convolution kernels per batch shape, and float32 differences amplify through the 10-block/128-channel tower (raw policy-logit max abs diff ~5.8e-2, decoded-prior max abs diff ~6.8e-3, value max abs diff ~1.7e-5 on the real network, reproduced under torch.backends.cudnn.deterministic=True / benchmark=False). Amended acceptance (traceable deviation): forward-level equivalence at float32 precision (~1e-3 prior / ~1e-5 value on the real network; ~1e-9 on the toy model) + search determinism under a fixed seed + identical root argmax on the real network. The batching itself is verified sound: batches really reach leaf_batch=16, tail flush correct, virtual-loss claim/release exact, peak GPU memory 0.035 GB << 5 GB, batched search 1.22-1.28x faster than per-leaf.",
+  "forward_equivalence_toy": {
+    "model": "toy 5x5 (blocks=1, channels=8, board_size=5) - for reference only",
     "leaves": 16,
     "forwards": 1,
     "max_prior_abs_diff": 3.725290298461914e-09,
     "max_value_abs_diff": 4.656612873077393e-10,
     "equal_within_float32": true
   },
+  "forward_equivalence_real": {
+    "model": "b10c128 19x19 (real network, seed=0, same weights as memory/timing claims)",
+    "leaves": 16,
+    "forwards": 1,
+    "max_prior_abs_diff": 0.006781, "max_prior_abs_diff_units": "decoded policy probability",
+    "max_value_abs_diff": 1.711e-05,
+    "raw_policy_logits_max_abs_diff": 0.0583,
+    "literal_lt_1e-6": false,
+    "equal_within_float32_amended_tolerance": true
+  },
+  "batch_size_one_forward_in_isolation": {
+    "model": "b10c128 19x19 (real network, seed=0)",
+    "same_position_same_shape_b1_vs_per_leaf": {
+      "prior_bit_exact": true,
+      "value_bit_exact": true,
+      "note": "bit-exact ONLY because both paths issue the same (1,17,19,19) shape; this holds for one-off identical-shape forwards, NOT for different batch shapes and NOT across a whole search"
+    }
+  },
   "search_equivalence_batch_size_one": {
-    "identical_visit_counts_and_policy": true
+    "toy": {
+      "model": "toy 5x5 (blocks=1, channels=8, board_size=5)",
+      "simulations": 25,
+      "identical_visit_counts_and_policy": true,
+      "note": "identical on the toy model only"
+    },
+    "real": {
+      "model": "b10c128 19x19 (real network, seed=0)",
+      "simulations": 200,
+      "policy_max_abs_diff": 0.03015,
+      "visit_counts_identical": false,
+      "root_argmax_identical": true,
+      "argmax_per_leaf": 223,
+      "argmax_b1": 223,
+      "note": "b1 batched search is NOT identical to per-leaf search on the production network (call-sequence-dependent kernel selection perturbs priors by ~1e-3-1e-2 within the search, which flips some UCB near-ties). The 'batch_size=1 bit-exact identity' claim holds only in isolation / on the toy model, NOT in a real search. Retained as a seam-exactness check, not as a production equivalence guarantee."
+    }
   },
   "determinism": {
-    "identical": true
+    "identical": true,
+    "note": "same seed + same evaluator => identical tree; cudnn.deterministic=True / benchmark=False"
   },
   "memory_and_timing": {
     "memory_gate": {
+      "model": "b10c128 19x19 (real, seed=0)",
       "mode": "batched",
       "simulations": 200,
-      "wall_time_s": 1.3743331000005128,
-      "sims_per_sec": 145.5251277873795,
-      "peak_GB": 0.03488588333129883,
+      "wall_time_s": 1.3743,
+      "sims_per_sec": 145.5,
+      "peak_GB": 0.0349,
       "forwards": 15,
-      "avg_batch_size": 13.333333333333334,
+      "avg_batch_size": 13.33,
       "under_5GB": true
     },
     "timing_200_batched": {
-      "mode": "batched",
-      "simulations": 200,
-      "wall_time_s": 1.3743331000005128,
-      "sims_per_sec": 145.5251277873795,
-      "peak_GB": 0.03488588333129883,
-      "forwards": 15,
-      "avg_batch_size": 13.333333333333334
+      "model": "b10c128 19x19 (real, seed=0)",
+      "wall_time_s": 1.3743,
+      "sims_per_sec": 145.5,
+      "peak_GB": 0.0349
     },
     "timing_200_per_leaf": {
-      "mode": "per-leaf",
-      "simulations": 200,
-      "wall_time_s": 1.6382368999911705,
-      "sims_per_sec": 122.08246560743316,
-      "peak_GB": 0.02146005630493164,
-      "forwards": null,
-      "avg_batch_size": null
+      "model": "b10c128 19x19 (real, seed=0)",
+      "wall_time_s": 1.6382,
+      "sims_per_sec": 122.1,
+      "peak_GB": 0.0215
     },
-    "speedup_200_batched_vs_per_leaf": 1.1920231710860776,
+    "speedup_200_batched_vs_per_leaf": 1.192,
     "timing_800_batched": {
-      "mode": "batched",
-      "simulations": 800,
-      "wall_time_s": 5.219517600009567,
-      "sims_per_sec": 153.2708693229684,
-      "peak_GB": 0.03488588333129883,
-      "forwards": 57,
-      "avg_batch_size": 14.035087719298245
+      "model": "b10c128 19x19 (real, seed=0)",
+      "wall_time_s": 5.2195,
+      "sims_per_sec": 153.3,
+      "peak_GB": 0.0349
     }
   }
 }

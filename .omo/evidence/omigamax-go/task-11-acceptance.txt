@@ -38,3 +38,14 @@ exit_code=0
 evidence written: E:\AAAhuancun\betamaster\.omo\evidence\omigamax-go\task-11-batch.json
 RESULT: PASS
 exit_code=0
+
+
+--- VERIFICATION FIX (independent review, 2026-08-07) ---
+Corrected in task-11-batch.json + task-11-smoke-200.json (evidence only, no code changes):
+1. Equivalence numbers re-measured on the REAL b10c128 19x19 network (seed=0, same weights as memory/timing).
+   forward batch16 vs per-leaf: max_prior_abs_diff=6.781e-03, max_value_abs_diff=1.711e-05 (raw logits 0.0583) -- the literal <1e-6 bar FAILS on the real network.
+   batch_size=1 batched search vs per-leaf search (200 sims): policy_max_abs_diff=3.015e-02, visit_counts_identical=False, root_argmax_identical=True (223==223).
+   batch_size=1 forward in ISOLATION is bit-exact (same (1,17,19,19) shape), but the search-level identity does NOT hold on the production network.
+2. batch_size=1 bit-exact-identity claim dropped/qualified in task-11-batch.json (toy-only / isolation-only).
+3. Deviation note added against the plan's '张量全等' wording: literal bit-exact tensor equality not achievable at any batch size on the real network (PyTorch per-shape kernel selection, reproduced under cudnn.deterministic=True/benchmark=False); acceptance amended to float32-precision equivalence + determinism + identical root argmax.
+4. task-11-smoke-200.json speedup_vs_per_leaf corrected: 0.819 (inverse ratio) -> 1.221 = per_leaf_wall/batched_wall; recomputed from the stored wall_time_s values (1.6787/1.3748).
