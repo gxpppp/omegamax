@@ -1,0 +1,60 @@
+{
+  "config": {
+    "board_size": 19,
+    "blocks": 10,
+    "channels": 128,
+    "c_puct": 2.5,
+    "dirichlet_alpha": 0.03,
+    "dirichlet_eps": 0.25,
+    "virtual_loss": 3,
+    "simulations": 200,
+    "seed": 0,
+    "temperature_threshold": 30
+  },
+  "dirichlet_noise": {
+    "formula": "P'(a) = (1 - eps) * P(a) + eps * eta(a), eta ~ Dir(alpha)",
+    "children": 362,
+    "sum": 0.9999999895516365,
+    "min": 4.163471286212284e-24,
+    "max": 0.4258990801182807,
+    "mean": 0.0027624309103636367,
+    "changed_children": 192,
+    "in_unit_interval": true,
+    "stored_priors_untouched": true,
+    "deterministic_same_seed": true
+  },
+  "temperature": {
+    "tau_early": 1.0,
+    "tau_late": 0.0,
+    "tau1_equals_visit_policy": true,
+    "tau1_sum": 1.0,
+    "tau0_mass_on_winners": 1.0,
+    "tau0_sum": 1.0,
+    "argmax_winners": [
+      223
+    ],
+    "sampled_tau1_distinct_actions": 5,
+    "sampled_tau0_all_argmax": true
+  },
+  "virtual_loss": {
+    "formula": "Q + c_puct * P * sqrt(N_root) / (1 + N_child + virtual_loss)",
+    "ucb_no_claim": [
+      4.743416490252569,
+      3.1622776601683795
+    ],
+    "selected_no_claim": 0,
+    "ucb_claimed_child": 1.1858541225631423,
+    "ucb_unclaimed_sibling": 3.1622776601683795,
+    "selected_while_claimed": 1,
+    "selection_flipped_by_virtual_loss": true,
+    "selected_after_revert": 0,
+    "restored_after_revert": true,
+    "leaf_virtual_loss_during_eval": [
+      3
+    ],
+    "clean_after_search": true,
+    "search_nodes": 110
+  },
+  "passed": true,
+  "device": "cuda"
+}

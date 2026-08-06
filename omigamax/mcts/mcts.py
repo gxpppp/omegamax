@@ -1,4 +1,4 @@
-"""MCTS tree-search core (todo 9): selection, expansion, backup (UCB).
+"""MCTS tree-search core (todo 9) + AGZ search details (todo 10).
 
 AlphaGo Zero style Monte Carlo tree search over the :class:`~omigamax.rules.board.Board`
 API. Each simulation has three phases (AGZ Nature 2017 Methods):
@@ -27,20 +27,48 @@ Pass handling: the pass move is index ``board_size ** 2`` (see
 actions always include it and the expanded children always contain a pass
 node.
 
-Design seams for later todos (deliberately *not* implemented here):
+Todo 10 adds the AGZ search details on top of the todo-9 core:
 
-* ``Node.virtual_loss`` (default 0) -- the counter that todo 10's virtual
-  loss and todo 11's batched leaf evaluation will use as a placeholder;
+* **Dirichlet root noise** (:func:`apply_dirichlet_noise`) -- the root's
+  legal-child priors are blended ``P'(a) = (1 - eps) * P(a) + eps * eta(a)``
+  with ``eta ~ Dir(alpha)`` (``alpha = dirichlet_alpha = 0.03``,
+  ``eps = dirichlet_eps = 0.25``). The blend is stored in a *transient*
+  override on the root (``Node.noisy_prior``), never in ``child.prior``, so
+  stored network priors stay pristine and re-running a search cannot
+  compound stale noise. It is applied only when ``run_search`` is asked for
+  it (``dirichlet_alpha is not None``) and only at the root.
+* **Temperature selection** (:func:`temperature_policy` /
+  :func:`sample_action`) -- AGZ move selection: ``pi(a) propto N(a)^(1/tau)``.
+  ``tau = 1.0`` (proportional to visit counts) for the first
+  ``temperature_threshold = 30`` moves, then ``tau -> 0`` (argmax). The
+  ``tau < 1e-6`` branch short-circuits to the argmax (ties share the mass
+  uniformly -- ``max(0, ..)`` protected, never a division by zero).
+* **Virtual loss** -- the ``virtual_loss = 3`` counter is incremented on the
+  leaf node *while it is being evaluated* and reverted immediately after
+  (``try/finally``). During the claim the node's effective visit count in
+  UCB is ``N_child + virtual_loss`` (``select_child`` divides by
+  ``1 + N_child + virtual_loss``), so a claimed leaf looks worse to any
+  concurrent selection -- the seam todo 11's batched leaf evaluation slots
+  into. Reverting keeps visit counts and the final policy exact.
+
+Design seams for later todos:
+
 * the ``evaluator`` interface ``callable(node) -> (prior_probs, value)`` --
   todo 11 swaps the per-leaf synchronous
-  :class:`NetworkEvaluator` for a batched one with the same contract.
+  :class:`NetworkEvaluator` for a batched one with the same contract;
+* ``Node.virtual_loss`` and ``Node.noisy_prior`` -- consumed only by
+  ``select_child``; everything else in this module treats them as opaque.
 
 Structure of the module:
 
 * :class:`Node` -- the tree node (``visit_count``, ``prior``, ``value_sum``,
   ``children``, ``legal_moves``, plus the position snapshot the node owns);
-* :func:`select_child` -- the UCB selection step;
+* :func:`select_child` -- the UCB selection step (noisy-prior override +
+  virtual-loss aware);
 * :func:`expand` -- create one child per legal move from the network prior;
+* :func:`apply_dirichlet_noise` -- AGZ root-prior noise (todo 10);
+* :func:`temperature_policy` / :func:`sample_action` -- AGZ move selection
+  with temperature (todo 10);
 * :func:`run_search` -- ``simulations`` full selection/expansion/backup
   passes from a root (also exported on the :class:`MCTS` facade);
 * :func:`visit_count_policy` / :func:`most_visited_action` -- the search
@@ -96,8 +124,13 @@ class Node:
         legal_moves: tuple of legal action indices for the player to move
             (``None`` until computed; always includes the pass index).
         parent: the parent node (``None`` for the root).
-        virtual_loss: placeholder counter reserved for todo 10/11 (virtual
-            loss + batched leaf evaluation); unused in todo 9.
+        virtual_loss: counter claimed on a leaf while it is being evaluated
+            (todo 10/11 virtual loss); ``select_child`` divides UCB by
+            ``1 + N_child + virtual_loss`` while it is non-zero.
+        noisy_prior: transient ``{action: noisy prior}`` override for the
+            *root's* children set by :func:`apply_dirichlet_noise` (``None``
+            when no noise is active). Selection uses the override at the root
+            only; the stored ``child.prior`` values are never mutated.
     """
 
     def __init__(
@@ -114,8 +147,9 @@ class Node:
         self.children: dict[int, "Node"] = {}
         self.legal_moves = legal_moves
         self.parent = parent
-        # --- todo-10/11 seam: virtual loss + batched leaf evaluation ---
+        # --- todo-10/11 seams: virtual loss + root Dirichlet-noise override ---
         self.virtual_loss = 0
+        self.noisy_prior: dict[int, float] | None = None
 
     # -- derived statistics ----------------------------------------------
 
@@ -218,18 +252,28 @@ def select_child(node: Node, c_puct: float) -> tuple[int, Node]:
     """Pick the child maximising ``Q + c_puct * P * sqrt(N_parent) / (1 + N_child)``.
 
     ``Q`` is the child's mean value (0 for unvisited children); ``P`` is the
-    child's prior. Ties break to the lowest action index (deterministic,
-    because ``children`` is inserted in ascending ``legal_moves`` order).
+    child's prior -- the network prior, or the Dirichlet-noised override from
+    ``node.noisy_prior`` when one is active (todo 10; only ever set on the
+    root, so non-root selection always uses the true stored priors). ``N`` in
+    the denominator is the child's *effective* visit count
+    ``visit_count + virtual_loss`` (todo 10): a leaf claimed for evaluation
+    (virtual loss 3) is depressed as if it had been visited ``virtual_loss``
+    more times, and once the claim is reverted its UCB returns to the true
+    value. Ties break to the lowest action index (deterministic, because
+    ``children`` is inserted in ascending ``legal_moves`` order).
 
     The ``sqrt(N_parent) / (1 + N_child)`` form is division-safe for brand
     new children (``N_child == 0``) and for a root that has never been
     visited (``sqrt(0) == 0``) -- never change the formula shape.
     """
     sqrt_parent = math.sqrt(node.visit_count)
+    noisy = node.noisy_prior if node.noisy_prior is not None else {}
     best_action: int | None = None
     best_score = -math.inf
     for action, child in node.children.items():
-        ucb = child.q_value + c_puct * child.prior * sqrt_parent / (1.0 + child.visit_count)
+        prior = noisy.get(action, child.prior)
+        effective_visits = child.visit_count + child.virtual_loss
+        ucb = child.q_value + c_puct * prior * sqrt_parent / (1.0 + effective_visits)
         if ucb > best_score:
             best_score = ucb
             best_action = action
@@ -325,6 +369,10 @@ def run_search(
     c_puct: float | None = None,
     komi: float | None = None,
     evaluator: Evaluator | None = None,
+    dirichlet_alpha: float | None = None,
+    dirichlet_eps: float | None = None,
+    dirichlet_rng: np.random.Generator | None = None,
+    virtual_loss: int | None = None,
 ) -> Node:
     """Run ``simulations`` full MCTS passes from ``root`` (in place).
 
@@ -338,6 +386,19 @@ def run_search(
         komi: komi used for terminal scoring (default ``config komi`` = 7.5).
         evaluator: pluggable leaf evaluator ``(node) -> (prior, value)``;
             defaults to a per-leaf :class:`NetworkEvaluator`.
+        dirichlet_alpha: AGZ root-noise concentration. When ``None`` (the
+            default) no noise is applied and any stale override is cleared;
+            otherwise ``apply_dirichlet_noise(root, dirichlet_alpha,
+            dirichlet_eps, rng=dirichlet_rng)`` blends the root's legal-child
+            priors once, before the first simulation (AGZ re-samples per
+            position -- callers apply it to a fresh root each move).
+        dirichlet_eps: noise blend weight (default ``config dirichlet_eps``
+            = 0.25, used only when ``dirichlet_alpha`` is given).
+        dirichlet_rng: numpy generator for the noise draw.
+        virtual_loss: virtual-loss value claimed on a leaf while it is being
+            evaluated (default ``config virtual_loss`` = 3; 0 disables). The
+            claim is released immediately after evaluation (``try/finally``),
+            so the final visit counts and policy are exact.
 
     Returns:
         ``root``, with updated visit statistics.
@@ -347,10 +408,24 @@ def run_search(
         c_puct = float(cfg.get("c_puct", DEFAULT_C_PUCT))
     if komi is None:
         komi = float(cfg.get("komi", DEFAULT_KOMI))
+    if virtual_loss is None:
+        virtual_loss = int(cfg.get("virtual_loss", DEFAULT_VIRTUAL_LOSS))
     if evaluator is None:
         if network is None:
             raise ValueError("either `network` or `evaluator` must be provided")
         evaluator = NetworkEvaluator(network)
+
+    # -- AGZ Dirichlet root noise: applied once, before the simulations --
+    if dirichlet_alpha is not None:
+        alpha = float(dirichlet_alpha)
+        eps = (
+            float(dirichlet_eps)
+            if dirichlet_eps is not None
+            else float(cfg.get("dirichlet_eps", DEFAULT_DIRICHLET_EPS))
+        )
+        apply_dirichlet_noise(root, alpha, eps, rng=dirichlet_rng)
+    else:
+        root.noisy_prior = None  # never let stale noise leak into a fresh run
 
     for _ in range(int(simulations)):
         # -- selection: descend until an unexpanded leaf --
@@ -366,8 +441,17 @@ def run_search(
         if node.board.is_terminal():
             value = terminal_value(node.board, komi)
         else:
-            prior, value = evaluator(node)
-            expand(node, prior)
+            # -- virtual-loss claim: the leaf is "in evaluation" (todo 11
+            #    batches exactly here). select_child divides by
+            #    1 + N_child + virtual_loss, so the claimed leaf is depressed
+            #    for any concurrent selection; released in `finally` so the
+            #    backup below records exact visit counts. --
+            node.virtual_loss += virtual_loss
+            try:
+                prior, value = evaluator(node)
+                expand(node, prior)
+            finally:
+                node.virtual_loss -= virtual_loss
 
         # -- backup: accumulate along the path, negating the perspective --
         for visited in reversed(path):
@@ -422,6 +506,162 @@ def most_visited_action(root: Node) -> int:
 
 
 # ---------------------------------------------------------------------------
+# AGZ search details (todo 10): Dirichlet root noise + temperature selection
+# ---------------------------------------------------------------------------
+
+# AGZ defaults mirroring config/default.yaml (overridable per call).
+DEFAULT_DIRICHLET_ALPHA = 0.03
+DEFAULT_DIRICHLET_EPS = 0.25
+DEFAULT_TEMPERATURE_THRESHOLD = 30
+DEFAULT_VIRTUAL_LOSS = 3
+# Selection temperatures below this are treated as tau -> 0 (argmax), which
+# avoids the division ``1 / tau`` blowing up (plan: tau < 1e-6 guard).
+TAU_ARGMAX_THRESHOLD = 1e-6
+
+
+def apply_dirichlet_noise(
+    root: Node,
+    alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    epsilon: float = DEFAULT_DIRICHLET_EPS,
+    rng: np.random.Generator | None = None,
+) -> dict[int, float]:
+    """Blend the root's legal-child priors with AGZ Dirichlet noise.
+
+    The exact AGZ blend (Nature 2017 Methods) is
+
+    ``P'(a) = (1 - epsilon) * P(a) + epsilon * eta(a)``,  ``eta ~ Dir(alpha)``,
+
+    applied to every *legal child* of the root (``root.children`` -- exactly
+    the legal moves, pass included). With ``alpha = 0.03`` and
+    ``epsilon = 0.25`` (the config defaults) the draw is sparse -- most
+    children get ``(1 - eps) * P`` and a handful get a sizeable boost.
+
+    The result is *not* written into ``child.prior``: it is stored in the
+    transient ``root.noisy_prior`` override (``select_child`` reads it only
+    at the root), so the stored network priors are never mutated, re-running
+    a search cannot compound stale noise, and non-root selection is
+    unaffected. Callers that want noise must re-apply it to a fresh root
+    every move (AGZ re-samples per position).
+
+    Reproducible: pass a seeded ``rng`` (``np.random.default_rng(seed)``).
+
+    Args:
+        root: the search root whose *children's* priors are noised.
+        alpha: Dirichlet concentration (``dirichlet_alpha``, default 0.03).
+        epsilon: blend weight (``dirichlet_eps``, default 0.25).
+        rng: numpy generator (defaults to a fresh ``default_rng()``).
+
+    Returns:
+        The ``{action: noisy_prior}`` override now stored on ``root`` (empty
+        for an unexpanded root or when ``alpha <= 0`` or ``epsilon <= 0``).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    noisy: dict[int, float] = {}
+    children = list(root.children.items())
+    if children and alpha > 0.0 and epsilon > 0.0:
+        eta = rng.dirichlet(np.full(len(children), float(alpha), dtype=np.float64))
+        for (action, child), eta_a in zip(children, eta):
+            noisy[action] = (1.0 - epsilon) * child.prior + epsilon * float(eta_a)
+    root.noisy_prior = noisy if noisy else None
+    return noisy
+
+
+def clear_root_noise(root: Node) -> None:
+    """Drop any Dirichlet-noise override from ``root`` (restore stored priors)."""
+    root.noisy_prior = None
+
+
+def temperature_policy(root: Node, temperature: float) -> np.ndarray:
+    """The AGZ temperature-softened search policy over the root's children.
+
+    ``pi(a) propto N(root, a) ** (1 / temperature)`` (visit counts), the
+    search distribution used for move selection and, in todo 13, as the
+    self-play training target. ``temperature = 1.0`` reproduces
+    :func:`visit_count_policy` exactly; ``temperature -> 0`` (any value
+    ``< TAU_ARGMAX_THRESHOLD``) concentrates all mass on the most-visited
+    children -- ties share the mass uniformly, so sampling resolves them
+    uniformly at random (the plan's "平局随机"). The ``tau < 1e-6`` guard
+    short-circuits before ``1 / temperature`` could overflow.
+
+    Computed in log-space (``(1/tau) * log N``, shifted by the max) so very
+    small temperatures never overflow ``N ** (1/tau)``. A root with no
+    visits (or no children) yields a uniform distribution over its children
+    -- sampling still returns a legal move -- and all-zero for a root with
+    no children at all (terminal position).
+
+    Returns a ``(board_size**2 + 1,)`` float32 array, zero outside the
+    root's children, summing to 1 whenever the root has children.
+    """
+    size = root.board.size
+    pi = np.zeros(size * size + 1, dtype=np.float32)
+    if not root.children:
+        return pi
+
+    if temperature < TAU_ARGMAX_THRESHOLD:
+        # tau -> 0: argmax. Ties share the mass -> random tie-break on sampling.
+        max_visits = max(c.visit_count for c in root.children.values())
+        winners = [a for a, c in root.children.items() if c.visit_count == max_visits]
+        share = 1.0 / len(winners)
+        for action in winners:
+            pi[action] = share
+        return pi
+
+    # tau > 0: pi propto N^(1/tau), in log space to avoid overflow.
+    log_weights = {}
+    for action, child in root.children.items():
+        log_weights[action] = (
+            math.log(child.visit_count) / temperature if child.visit_count > 0 else -math.inf
+        )
+    max_log = max(log_weights.values())
+    if max_log == -math.inf:  # every child unvisited -> uniform over children
+        share = 1.0 / len(root.children)
+        for action in root.children:
+            pi[action] = share
+        return pi
+    for action, log_w in log_weights.items():
+        if log_w > -math.inf:
+            pi[action] = math.exp(log_w - max_log)
+    total = float(pi.sum())
+    if total > 0.0:
+        pi /= total
+    return pi
+
+
+def sample_action(
+    root: Node,
+    temperature: float,
+    rng: np.random.Generator | None = None,
+) -> int:
+    """Sample one move from :func:`temperature_policy` at ``temperature``.
+
+    ``temperature = 1.0`` samples proportional to visit counts (AGZ first
+    ``temperature_threshold = 30`` moves); ``temperature -> 0`` always
+    returns a most-visited action (ties resolved uniformly at random --
+    reproducible with a seeded ``rng``). Falls back to
+    :func:`most_visited_action` for a terminal root (no children).
+
+    Args:
+        root: the search root.
+        temperature: the selection temperature (``tau``).
+        rng: numpy generator for the sample (defaults to a fresh one).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    pi = temperature_policy(root, temperature)
+    actions = list(root.children)
+    if not actions:
+        return most_visited_action(root)
+    probs = np.array([pi[a] for a in actions], dtype=np.float64)
+    total = float(probs.sum())
+    if total <= 0.0:
+        return most_visited_action(root)
+    probs /= total
+    idx = int(rng.choice(len(actions), p=probs))
+    return actions[idx]
+
+
+# ---------------------------------------------------------------------------
 # facade
 # ---------------------------------------------------------------------------
 
@@ -429,7 +669,7 @@ class MCTS:
     """High-level MCTS facade: owns the root across consecutive actions.
 
     ``network`` (or a custom ``evaluator``) evaluates leaves; ``c_puct`` /
-    ``komi`` default from ``config/default.yaml``. Usage::
+    ``komi`` / AGZ search details default from ``config/default.yaml``. Usage::
 
         mcts = MCTS(network=model)
         root = mcts.new_root(board)   # reset the search tree
@@ -437,6 +677,12 @@ class MCTS:
         pi = mcts.policy()            # visit-count distribution
         action = mcts.select_action() # most-visited move
         mcts.apply_action(action)     # reuse the tree: root becomes child
+
+    Todo-10 knobs: ``dirichlet_alpha`` (``None`` = no root noise, otherwise
+    the AGZ concentration applied to a fresh root on every ``run``),
+    ``dirichlet_eps``, ``dirichlet_rng`` (seeded for reproducibility) and
+    ``virtual_loss``. ``sample_action(tau, rng)`` implements AGZ temperature
+    move selection (``tau = 1`` early, ``tau -> 0`` = argmax later).
     """
 
     def __init__(
@@ -445,12 +691,30 @@ class MCTS:
         c_puct: float | None = None,
         komi: float | None = None,
         evaluator: Evaluator | None = None,
+        dirichlet_alpha: float | None = None,
+        dirichlet_eps: float | None = None,
+        dirichlet_rng: np.random.Generator | None = None,
+        virtual_loss: int | None = None,
     ) -> None:
         cfg = load_config()
         self.network = network
         self.c_puct = float(c_puct) if c_puct is not None else float(cfg.get("c_puct", DEFAULT_C_PUCT))
         self.komi = float(komi) if komi is not None else float(cfg.get("komi", DEFAULT_KOMI))
         self.evaluator = evaluator
+        self.dirichlet_alpha = (
+            float(dirichlet_alpha) if dirichlet_alpha is not None else None
+        )
+        self.dirichlet_eps = (
+            float(dirichlet_eps)
+            if dirichlet_eps is not None
+            else float(cfg.get("dirichlet_eps", DEFAULT_DIRICHLET_EPS))
+        )
+        self.dirichlet_rng = dirichlet_rng
+        self.virtual_loss = (
+            int(virtual_loss)
+            if virtual_loss is not None
+            else int(cfg.get("virtual_loss", DEFAULT_VIRTUAL_LOSS))
+        )
         self.root: Node | None = None
 
     def new_root(self, board: Board) -> Node:
@@ -469,6 +733,10 @@ class MCTS:
             c_puct=self.c_puct,
             komi=self.komi,
             evaluator=self.evaluator,
+            dirichlet_alpha=self.dirichlet_alpha,
+            dirichlet_eps=self.dirichlet_eps,
+            dirichlet_rng=self.dirichlet_rng,
+            virtual_loss=self.virtual_loss,
         )
 
     def policy(self) -> np.ndarray:
@@ -482,6 +750,17 @@ class MCTS:
         if self.root is None:
             raise RuntimeError("call new_root(board) before select_action()")
         return most_visited_action(self.root)
+
+    def sample_action(self, temperature: float, rng: np.random.Generator | None = None) -> int:
+        """Sample a move with AGZ temperature selection (todo 10).
+
+        ``tau = 1.0`` samples proportional to visit counts (the first
+        ``temperature_threshold`` moves); ``tau < 1e-6`` resolves to the
+        argmax (ties uniform-random, reproducible with a seeded ``rng``).
+        """
+        if self.root is None:
+            raise RuntimeError("call new_root(board) before sample_action()")
+        return sample_action(self.root, temperature, rng=rng)
 
     def apply_action(self, action: int) -> Node:
         """Advance the tree: the chosen child becomes the new root."""

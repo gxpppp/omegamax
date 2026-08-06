@@ -1,0 +1,179 @@
+================================================================================
+omigamax-go todo 10: MCTS AGZ 细节 -- Dirichlet 根噪声 / 温度 tau / 虚拟损失
+Date: 2026-08-07 | HEAD before: 4408567 | Worktree: E:\AAAhuancun\betamaster
+================================================================================
+
+IMPLEMENTED ALGORITHMS (exact formulas)
+---------------------------------------
+1. Dirichlet root noise (omigamax/mcts/mcts.py::apply_dirichlet_noise)
+     P'(a) = (1 - eps) * P(a) + eps * eta(a),   eta ~ Dir(alpha)
+     alpha = dirichlet_alpha = 0.03, eps = dirichlet_eps = 0.25 (config).
+   - Applied ONLY to the root's legal children (root.children == exactly the
+     legal moves incl. pass), sampled ONCE per position before the
+     simulations (AGZ re-samples per move).
+   - Stored in the transient override `root.noisy_prior` ({action: prior});
+     `child.prior` network values are NEVER mutated, so repeated search or a
+     later run cannot compound stale noise (run_search without noise clears
+     the override first). Non-root selection always uses the true priors.
+   - Reproducible with a seeded `np.random.default_rng(seed)`.
+   - select_child picks `prior = noisy_prior.get(action, child.prior)`.
+
+2. Temperature selection (temperature_policy / sample_action)
+     pi(a) propto N(root, a) ** (1 / tau)  over the root's children.
+   - tau = 1.0 for the first temperature_threshold = 30 moves (== exact
+     visit-count policy, verified), then tau -> 0 (argmax).
+   - tau < 1e-6 (TAU_ARGMAX_THRESHOLD) short-circuits to the argmax branch:
+     all mass on the most-visited children; ties share the mass uniformly
+     (random tie-break, reproducible with a seeded rng). Division by
+     tau is impossible in that branch -> no division-by-zero / overflow.
+   - Computed in log space ((1/tau)*log N shifted by the max) so tiny
+     temperatures never overflow N**(1/tau).
+
+3. Virtual loss (select_child denominator + run_search claim/release)
+     UCB = Q + c_puct * P * sqrt(N_parent) / (1 + N_child + virtual_loss)
+   - During leaf evaluation run_search claims the leaf
+     (node.virtual_loss += 3) inside try/finally and releases it right after
+     (`-= 3`), so the effective visit count in UCB is N_child + virtual_loss
+     while the leaf is "in evaluation", and the final visit counts / policy
+     are exact. This is the seam todo 11's batched leaf evaluation slots into.
+
+HOOK POINTS (omigamax/mcts/mcts.py)
+-----------------------------------
+- Node: new `noisy_prior` field (transient root override).
+- select_child: noisy-prior override + `1 + visit_count + virtual_loss` denominator.
+- apply_dirichlet_noise / clear_root_noise / temperature_policy / sample_action: new module-level functions (exported from omigamax/mcts/__init__.py).
+- run_search: new params dirichlet_alpha (None = off), dirichlet_eps,
+  dirichlet_rng, virtual_loss (default config 3); noise applied before the
+  sim loop; virtual loss claimed/released around the leaf evaluator call.
+- MCTS facade: dirichlet_alpha/eps/rng + virtual_loss threaded through;
+  new method sample_action(tau, rng=None).
+- Config: values unchanged (dirichlet_alpha 0.03, dirichlet_eps 0.25,
+  temperature_threshold 30, virtual_loss 3).
+
+TESTS (tests/test_mcts.py, +20 new cases; 36 in file)
+-----------------------------------------------------
+Dirichlet noise:
+  test_dirichlet_noise_blend_formula_exact
+  test_dirichlet_noise_changes_distribution_and_sums_to_one
+  test_dirichlet_noise_priors_stay_in_unit_interval
+  test_dirichlet_noise_deterministic_with_seeded_rng
+  test_dirichlet_noise_only_affects_root_stored_priors_untouched
+  test_select_child_uses_noisy_prior_override
+  test_dirichlet_noise_unexpanded_root_is_noop
+  test_run_search_noise_cleared_when_not_requested
+Temperature:
+  test_temperature_tau_one_matches_visit_policy
+  test_temperature_policy_shape_and_normalization
+  test_temperature_tau_zero_concentrates_on_argmax
+  test_sample_action_tau_zero_always_picks_most_visited
+  test_sample_action_tau_one_covers_multiple_children
+  test_temperature_tau_zero_tie_break_reproducible_with_seed
+  test_temperature_guard_no_division_by_zero_on_unsearched_root
+  test_temperature_policy_terminal_root_all_zero
+Virtual loss:
+  test_virtual_loss_depresses_ucb_and_flips_selection
+  test_run_search_claims_virtual_loss_on_leaf_during_eval
+  test_virtual_loss_does_not_leak_into_visits_or_policy
+  test_virtual_loss_zero_disabled
+
+================================================================================
+ACCEPTANCE COMMAND 1: uv run pytest tests/test_mcts.py -v
+================================================================================
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- E:\AAAhuancun\betamaster\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: E:\AAAhuancun\betamaster
+configfile: pyproject.toml
+collecting ... collected 36 items
+
+tests/test_mcts.py::test_ucb_high_q_wins_with_same_prior_and_visits PASSED [  2%]
+tests/test_mcts.py::test_ucb_high_prior_wins_with_same_q_and_visits PASSED [  5%]
+tests/test_mcts.py::test_ucb_formula_exact_numbers PASSED                [  8%]
+tests/test_mcts.py::test_one_search_accumulates_visits_and_children_sum_to_root PASSED [ 11%]
+tests/test_mcts.py::test_backup_propagates_negated_values_to_ancestors PASSED [ 13%]
+tests/test_mcts.py::test_expansion_uses_network_prior_and_root_visits_equal_sims PASSED [ 16%]
+tests/test_mcts.py::test_policy_is_normalized_visit_counts_including_pass PASSED [ 19%]
+tests/test_mcts.py::test_select_action_returns_most_visited_child PASSED [ 22%]
+tests/test_mcts.py::test_zero_simulations_produces_all_zero_policy PASSED [ 25%]
+tests/test_mcts.py::test_illegal_actions_never_become_children PASSED    [ 27%]
+tests/test_mcts.py::test_pass_child_exists_and_is_selectable PASSED      [ 30%]
+tests/test_mcts.py::test_only_pass_legal_root PASSED                     [ 33%]
+tests/test_mcts.py::test_terminal_leaf_is_never_expanded_value_propagated_directly PASSED [ 36%]
+tests/test_mcts.py::test_deterministic_with_fixed_network PASSED         [ 38%]
+tests/test_mcts.py::test_tree_reuse_root_becomes_child_across_actions PASSED [ 41%]
+tests/test_mcts.py::test_descend_helper_returns_chosen_child PASSED      [ 44%]
+tests/test_mcts.py::test_dirichlet_noise_blend_formula_exact PASSED      [ 47%]
+tests/test_mcts.py::test_dirichlet_noise_changes_distribution_and_sums_to_one PASSED [ 50%]
+tests/test_mcts.py::test_dirichlet_noise_priors_stay_in_unit_interval PASSED [ 52%]
+tests/test_mcts.py::test_dirichlet_noise_deterministic_with_seeded_rng PASSED [ 55%]
+tests/test_mcts.py::test_dirichlet_noise_only_affects_root_stored_priors_untouched PASSED [ 58%]
+tests/test_mcts.py::test_select_child_uses_noisy_prior_override PASSED   [ 61%]
+tests/test_mcts.py::test_dirichlet_noise_unexpanded_root_is_noop PASSED  [ 63%]
+tests/test_mcts.py::test_run_search_noise_cleared_when_not_requested PASSED [ 66%]
+tests/test_mcts.py::test_temperature_tau_one_matches_visit_policy PASSED [ 69%]
+tests/test_mcts.py::test_temperature_policy_shape_and_normalization PASSED [ 72%]
+tests/test_mcts.py::test_temperature_tau_zero_concentrates_on_argmax PASSED [ 75%]
+tests/test_mcts.py::test_sample_action_tau_zero_always_picks_most_visited PASSED [ 77%]
+tests/test_mcts.py::test_sample_action_tau_one_covers_multiple_children PASSED [ 80%]
+tests/test_mcts.py::test_temperature_tau_zero_tie_break_reproducible_with_seed PASSED [ 83%]
+tests/test_mcts.py::test_temperature_guard_no_division_by_zero_on_unsearched_root PASSED [ 86%]
+tests/test_mcts.py::test_temperature_policy_terminal_root_all_zero PASSED [ 88%]
+tests/test_mcts.py::test_virtual_loss_depresses_ucb_and_flips_selection PASSED [ 91%]
+tests/test_mcts.py::test_run_search_claims_virtual_loss_on_leaf_during_eval PASSED [ 94%]
+tests/test_mcts.py::test_virtual_loss_does_not_leak_into_visits_or_policy PASSED [ 97%]
+tests/test_mcts.py::test_virtual_loss_zero_disabled PASSED               [100%]
+
+============================= 36 passed in 1.75s ==============================
+pytest tests/test_mcts.py -v exit code: 0
+
+================================================================================
+ACCEPTANCE COMMAND 2: uv run pytest -q  (full suite)
+================================================================================
+........................................................................ [ 49%]
+........................................................................ [ 99%]
+.                                                                        [100%]
+145 passed in 5.27s
+pytest exit code: 0
+(125 pre-existing + 20 new todo-10 cases = 145)
+
+================================================================================
+ACCEPTANCE DEMO: uv run python -m omigamax.cli.agz_demo --sims 200 --seed 0
+================================================================================
+=== omigamax AGZ-details demo (todo 10) ===
+config: board=19 blocks=10 channels=128 c_puct=2.5 alpha=0.03 eps=0.25 virtual_loss=3 simulations=200 temperature_threshold=30 seed=0
+device: cuda
+
+[1] Dirichlet root noise
+  formula: P'(a) = (1 - eps) * P(a) + eps * eta(a), eta ~ Dir(alpha)
+  blend over 362 legal children: sum=1.000000 min=0.0000 max=0.4259 mean=0.0028
+  changed children: 192/362 (prior visibly shifted)
+  in [0,1]: True | stored child.prior untouched: True | same-seed deterministic: True
+
+[2] Temperature selection (tau=1 early, tau->0 later)
+  tau=1 policy == visit-count policy: True (sum 1.000000)
+  tau=0: all mass (1.000000) on argmax winners [223] (sum 1.000000)
+  sampling 500x @tau=1 reached 5 distinct actions; 100x @tau=0 all argmax: True
+
+[3] Virtual loss
+  formula: Q + c_puct * P * sqrt(N_root) / (1 + N_child + virtual_loss)
+  hand-built tree (root visits 10): UCB no-claim [4.743416490252569, 3.1622776601683795] -> selected 0; child claimed (vl=3): UCB 1.185854 vs sibling 3.162278 -> selected 1 (flipped: True); after revert selected 0 (restored: True)
+  real search: leaf virtual_loss during eval = [3] (3 nodes searched); clean after search: True
+
+RESULT: PASS (noise blend ok, tau1==visit policy, tau0 argmax, virtual-loss UCB depression + revert ok)
+agz_demo exit code: 0
+
+================================================================================
+QA SCENARIOS FROM PLAN
+--------------------------------------------------------------------------------
+- happy: new unit tests green + demo behavioral checks all True -> EVIDENCE THIS FILE.
+- failure (noise breaks probability sum): not observed -- blend sums to 1.0
+  (min 0.0 / max 0.4259 over 362 children, sum 1.000000); unit test
+  test_dirichlet_noise_changes_distribution_and_sums_to_one asserts sum ~ 1.
+- failure (tau division by zero): not observed -- TAU_ARGMAX_THRESHOLD=1e-6
+  branch short-circuits; test_temperature_guard_no_division_by_zero_on_unsearched_root
+  exercises tau in {0.0, 1e-9, 5e-7}.
+- failure evidence path (.omo/evidence/omigamax-go/task-10-fail.log) not created
+  because no failure occurred.
+================================================================================
+Demo JSON evidence also written: .omo/evidence/omigamax-go/task-10-agz-demo.json
+================================================================================
