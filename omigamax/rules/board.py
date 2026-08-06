@@ -11,6 +11,7 @@ change is expected.
 """
 
 from .captures import capture
+from .ko import is_ko_prohibited
 from .legality import IllegalMoveError, is_legal_move
 from .liberties import (
     BLACK,
@@ -20,6 +21,13 @@ from .liberties import (
     has_liberty,
     liberties,
     liberty_count,
+)
+from .scoring import (
+    is_terminal,
+    result_string,
+    score,
+    territory,
+    winner,
 )
 
 
@@ -76,15 +84,42 @@ class Board:
         """True if the group containing (r, c) has at least one liberty."""
         return has_liberty(self._state, self.size, r, c)
 
+    # -- terminal / scoring (todo 4) ------------------------------------
+
+    def is_terminal(self):
+        """True if the game is over: two consecutive passes."""
+        return is_terminal(self)
+
+    def territory(self):
+        """Map each empty point to its territory owner (see ``scoring``)."""
+        return territory(self._state, self.size)
+
+    def score(self, komi=7.5):
+        """Tromp-Taylor area score ``(black, white)`` with komi on white."""
+        return score(self._state, self.size, komi)
+
+    def winner(self, komi=7.5):
+        """``'B'``, ``'W'`` or ``None`` (jigo)."""
+        return winner(self._state, self.size, komi)
+
+    def result_string(self, komi=7.5):
+        """SGF-style result, e.g. ``'B+3.5'`` or ``'W+2'``."""
+        return result_string(self._state, self.size, komi)
+
     # -- play ----------------------------------------------------------
 
     def is_legal(self, move, color):
         """True if ``move`` is legal for ``color``.
 
-        Pass (``None``) is always legal. Ko/superko are not enforced yet
-        (todo 4); bounds, occupancy and suicide prohibition are.
+        Pass (``None``) is always legal. Enforces bounds, occupancy, suicide
+        prohibition (todo 3) and simple ko (todo 4): a move that would
+        immediately retake the single stone captured on the opponent's last
+        move is illegal. Superko is deliberately not enforced (plan's locked
+        decision for todo 4).
         """
-        return is_legal_move(self._state, self.size, move, color)
+        if not is_legal_move(self._state, self.size, move, color):
+            return False
+        return not is_ko_prohibited(self.last_captured_point, move)
 
     def play(self, move, color):
         """Place a stone (or pass) and remove captured opponent stones.
