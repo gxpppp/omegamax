@@ -37,3 +37,9 @@ checkpoints/
 *.swo
 .DS_Store
 Thumbs.db
+
+# KataGo binary + weights (downloaded for external validation; not committed)
+tools/
+
+# KataGo GTP engine logs (written next to the process cwd)
+gtp_logs/
