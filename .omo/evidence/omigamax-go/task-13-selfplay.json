@@ -1,0 +1,151 @@
+{
+  "todo": 13,
+  "device": "cuda",
+  "protocol": {
+    "games": 10,
+    "simulations_per_move": 40,
+    "board_size": 19,
+    "komi": 7.5,
+    "temperature_threshold": 30,
+    "max_moves": 1000,
+    "data_dir": "data\\selfplay",
+    "keep_games": 1000,
+    "master_seed": 0,
+    "dirichlet_alpha": 0.03,
+    "dirichlet_eps": 0.25
+  },
+  "report": {
+    "games": 10,
+    "positions": 3770,
+    "sims": 150800,
+    "wall_time_s": 1719.969581399986,
+    "sims_per_sec": 87.67596917455649,
+    "positions_per_sec": 2.191899229363912,
+    "games_per_hour": 20.9306027207164,
+    "data_dir": "data\\selfplay",
+    "keep_games": 1000,
+    "pruned": [],
+    "simulations_per_move": 40,
+    "npz_files": [
+      "game_0000000000.npz",
+      "game_0000000001.npz",
+      "game_0000000002.npz",
+      "game_0000000003.npz",
+      "game_0000000004.npz",
+      "game_0000000005.npz",
+      "game_0000000006.npz",
+      "game_0000000007.npz",
+      "game_0000000008.npz",
+      "game_0000000009.npz"
+    ]
+  },
+  "games": [
+    {
+      "seed": 0,
+      "winner": "W",
+      "result": "W+60.5",
+      "move_count": 402,
+      "sims": 16080,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000000.npz"
+    },
+    {
+      "seed": 1,
+      "winner": "W",
+      "result": "W+3.5",
+      "move_count": 365,
+      "sims": 14600,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000001.npz"
+    },
+    {
+      "seed": 2,
+      "winner": "W",
+      "result": "W+34.5",
+      "move_count": 380,
+      "sims": 15200,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000002.npz"
+    },
+    {
+      "seed": 3,
+      "winner": "W",
+      "result": "W+23.5",
+      "move_count": 358,
+      "sims": 14320,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000003.npz"
+    },
+    {
+      "seed": 4,
+      "winner": "W",
+      "result": "W+12.5",
+      "move_count": 359,
+      "sims": 14360,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000004.npz"
+    },
+    {
+      "seed": 5,
+      "winner": "W",
+      "result": "W+23.5",
+      "move_count": 384,
+      "sims": 15360,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000005.npz"
+    },
+    {
+      "seed": 6,
+      "winner": "W",
+      "result": "W+17.5",
+      "move_count": 385,
+      "sims": 15400,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000006.npz"
+    },
+    {
+      "seed": 7,
+      "winner": "W",
+      "result": "W+24.5",
+      "move_count": 406,
+      "sims": 16240,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000007.npz"
+    },
+    {
+      "seed": 8,
+      "winner": "W",
+      "result": "W+10.5",
+      "move_count": 361,
+      "sims": 14440,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000008.npz"
+    },
+    {
+      "seed": 9,
+      "winner": "W",
+      "result": "W+33.5",
+      "move_count": 370,
+      "sims": 14800,
+      "forced_terminal": false,
+      "resigned": false,
+      "npz": "data\\selfplay\\game_0000000009.npz"
+    }
+  ],
+  "soft_gate": {
+    "warn_threshold_sims_per_sec": 150.0,
+    "sims_per_sec": 87.67596917455649,
+    "warned": true,
+    "suggestion": "generation is functional but slow; suggestions: raise config leaf_batch, enable fp16 autocast in the batched evaluator (config fp16), or use a smaller --simulations budget for the acceptance run."
+  },
+  "accepted": true
+}

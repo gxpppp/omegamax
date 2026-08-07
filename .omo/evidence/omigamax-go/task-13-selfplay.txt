@@ -1,0 +1,147 @@
+omigamax todo 13 -- 自对弈生成器 (self-play data generator)
+===========================================================
+Date: 2026-08-07   Platform: Windows 10, PowerShell 5.1   GPU: RTX 3060 6GB (cuda)
+Plan: .omo/plans/omigamax-go.md todo 13 (authoritative) | Draft: .omo/drafts/omigamax-go.md
+Baseline: HEAD 96331c3 on origin/main, 158 tests green (todos 1-12 complete).
+
+--------------------------------------------------------------------------
+1. GENERATOR DESIGN  (omigamax/train/selfplay.py)
+--------------------------------------------------------------------------
+play_game(network, cfg, ...) -- one full self-play game, the same network on
+both colours:
+
+  * Opening: empty board (Board(size)); terminal: two consecutive passes
+    (Board.is_terminal); scoring: Tromp-Taylor area + komi 7.5 -> winner
+    "B"/"W" (jigo impossible with komi 7.5).
+  * Per move: fresh search root (mcts.new_root), run_search(simulations)
+    with the config's batched leaf evaluator (BatchedNetworkEvaluator,
+    leaf_batch 16); AGZ Dirichlet root noise (alpha 0.03 / eps 0.25) is
+    re-sampled on every move's fresh root (todo-10 machinery, seeded rng).
+  * Temperature schedule (caller-side tau switching, plan todo 10):
+    tau = 1.0 for the first temperature_threshold (30) moves ->
+    sample_action(tau=1) proportional to visit counts; afterwards
+    tau = 0.0 -> sample_action(tau=0) = argmax (ties uniform-random).
+  * Training tuple recorded per move, BEFORE the move is applied:
+      s  = encode(up to 8 prior game positions, mover colour)  -> (17,N,N) f32
+      pi = temperature_policy(root, tau)  (search distribution, NOT a one-hot)
+      z  = z_targets(move_count, winner): +1 if the mover won, -1 otherwise.
+  * Resign: config resign_threshold = 0.0 disables it (the AGZ 0.5% resign is
+    a documented extension behind the same config bit, only active when > 0);
+    the branch is implemented and unit-tested with a constant-value probe net.
+  * Timeout protection: > max_moves (1000) force-terminates, scores the
+    position and marks forced_terminal.
+  * Inference discipline (plan G3): network.eval() before the game; every
+    forward runs under torch.no_grad() (BatchedNetworkEvaluator) -> BN
+    running stats are never updated by self-play; verified by a probe net.
+
+Data storage (generate_games / CLI):
+  * One npz per game: data/selfplay/game_<seed:010d>.npz
+    (np.savez_compressed, arrays s/pi/z + metadata board_size, komi, winner,
+    result, move_count, simulations, temperature_threshold,
+    forced_terminal, seed); atomic tmp + os.replace.
+  * Pruning: keeps the newest replay_buffer_games (=1000) games, oldest by
+    mtime_ns removed.
+  * Throughput report: sims/s (total search simulations / single-process
+    wall-clock s, network forward included), positions/s, games/hour; the
+    plan's soft gate sims/s < 150 -> WARN + optimisation notes (never a
+    hard failure; exit code always 0).
+  * Cross-move search-tree reuse is a documented extension (plan G4), not
+    implemented (fresh root per move).
+
+--------------------------------------------------------------------------
+2. TESTS  (tests/test_selfplay.py -- 19 new cases)
+--------------------------------------------------------------------------
+TestZTargets.test_black_wins_all_positions_from_mover_perspective
+TestZTargets.test_white_wins
+TestZTargets.test_jigo_is_zero
+TestZTargets.test_empty_game
+TestZTargets.test_dtype_float32
+TestZTargets.test_z_consistent_with_scoring      (z vs board.winner replay)
+TestPi.test_pi_sums_to_one_and_masks_illegal
+TestPi.test_pi_is_visit_count_policy_at_tau_one  (exact re-run of search)
+TestPi.test_pi_is_not_one_hot
+TestFeatures.test_shape_and_dtype                (T,17,N,N) float32
+TestFeatures.test_planes_round_trip_vs_replay    (history window + colour plane)
+TestNpz.test_save_load_round_trip                (npz round-trip, no .tmp left)
+TestNpz.test_generate_writes_npz_and_prunes      (keep=2 -> one pruned)
+TestInferenceMode.test_eval_mode_and_no_grad     (probe: eval() + no_grad())
+TestLegality.test_all_recorded_moves_legal       (replay against Board)
+TestTemperatureSchedule.test_tau_schedule_and_late_argmax
+TestResign.test_resign_threshold_zero_never_resigns
+TestResign.test_resign_branch_triggers_when_enabled
+TestCli.test_main_smoke                          (CLI wiring, exit 0, evidence)
+
+--------------------------------------------------------------------------
+3. PYTEST SUMMARY
+--------------------------------------------------------------------------
+Command:  uv run pytest -q
+Result:   177 passed in 15.95s      (158 prior todos 1-12 + 19 new todo-13)
+Exit code: 0
+
+--------------------------------------------------------------------------
+4. ACCEPTANCE COMMAND  (plan todo 13, run exactly)
+--------------------------------------------------------------------------
+Command:  uv run python -m omigamax.train.selfplay --games 10 --simulations 40
+Evidence: .omo/evidence/omigamax-go/task-13-selfplay.json
+Exit code: 0   (RESULT: PASS; sims/s soft gate is a warning, not a failure)
+
+Output (tail):
+  game seed=0: moves=402 sims=16080 result=W+60.5
+  game seed=1: moves=365 sims=14600 result=W+3.5
+  game seed=2: moves=380 sims=15200 result=W+34.5
+  game seed=3: moves=358 sims=14320 result=W+23.5
+  game seed=4: moves=359 sims=14360 result=W+12.5
+  game seed=5: moves=384 sims=15360 result=W+23.5
+  game seed=6: moves=385 sims=15400 result=W+17.5
+  game seed=7: moves=406 sims=16240 result=W+24.5
+  game seed=8: moves=361 sims=14440 result=W+10.5
+  game seed=9: moves=370 sims=14800 result=W+33.5
+  throughput: games=10 positions=3770 sims=150800 wall=1720.0s
+    sims/s = 87.7  positions/s = 2.2  games/hour = 20.9
+  SOFT GATE WARN: sims/s 87.7 < 150.0 -- generation is functional but slow;
+    suggestions: raise config leaf_batch, enable fp16 autocast in the batched
+    evaluator (config fp16), or use a smaller --simulations budget for the
+    acceptance run.
+  RESULT: PASS (exit 0; sims/s soft gate is a warning, not a failure)
+
+All 10 games legal by construction (Board.play raises on illegal moves);
+npz per game contains s (T,17,19,19) f32 / pi (T,362) f32 (rows sum to 1,
+illegal moves exactly 0) / z (T,) f32 in {-1,+1} matching each mover's
+perspective (verified: game_0000000000, winner W, z pattern -1,+1,-1,+1,...).
+Simulations config stays 200 -- no config value was changed (the acceptance
+--simulations 40 is a CLI override).
+
+--------------------------------------------------------------------------
+5. TIMING BASELINE AT CONFIG SIMULATIONS (=200)
+--------------------------------------------------------------------------
+Command:  uv run python -m omigamax.train.selfplay --games 1 --simulations 200
+          --seed 42  (config simulations/move = 200)
+  game seed=42: moves=290 sims=58000 result=W+114.5
+  throughput: games=1 positions=290 sims=58000 wall=632.2s
+    sims/s = 91.7  positions/s = 0.5  games/hour = 5.7
+  SOFT GATE WARN: sims/s 91.7 < 150.0 (warning only)
+
+Observed sims/s is ~88-92 regardless of the per-move sim budget (40 or 200),
+i.e. the rate is bounded by the pure-Python MCTS tree code + per-move batched
+forward, not by the search length. Note: the plan's todo-12 run measured
+~90-160 sims/s on the same GPU family; soft-gate WARN is expected here.
+
+--------------------------------------------------------------------------
+6. EVIDENCE FILES
+--------------------------------------------------------------------------
+  .omo/evidence/omigamax-go/task-13-selfplay.json      (CLI evidence, plan path)
+  .omo/evidence/omigamax-go/task-13-selfplay.txt       (this file)
+  .omo/evidence/omigamax-go/task-13-sample-game.npz    (copy of game_0000000000,
+                                                        401212 bytes; gitignored
+                                                        by *.npz, not committed)
+  logs/selfplay.jsonl                                  (throughput log line)
+  data/selfplay/game_*.npz                             (11 games; gitignored)
+
+--------------------------------------------------------------------------
+7. SCOPE NOTE
+--------------------------------------------------------------------------
+No training step (todo 14), no evaluation gate (todo 15), no loop
+orchestration (todo 16) implemented. No config value changes, no README
+edits, no changes to rules/network/mcts modules (used as-is), no new
+dependencies. .gitignore gained one line (data/). Commit message: plan's
+todo-13 line "feat(train): 自对弈生成器".
