@@ -1,0 +1,28 @@
+﻿=== omigamax evaluation gate (todo 15) - REPLACE-path demo ===
+Run: uv run python -u -m omigamax.train.evaluate --games 3 --sims 40 --max-moves 250
+  --candidate <tmp: demo candidate, step 320, 300 more SGD steps on real selfplay data>
+  --best models/best.pt (random-init bootstrap from the acceptance run)
+Exit code: 0
+
+Output:
+=== omigamax evaluation gate (todo 15) ===
+device: cuda
+protocol: candidate=...omigamax-demo-candidate.pt best=models/best.pt games=3 sims=40 board=19 komi=7.5 virtual_loss=3 replace_threshold=0.55 seed=0
+best.pt: loaded existing checkpoint
+  game seed=0: candidate=B winner=B moves=250 result=B+112.5 (max-moves forced)
+  game seed=1: candidate=W winner=W moves=250 result=W+82.5 (max-moves forced)
+  game seed=2: candidate=B winner=B moves=250 result=B+96.5 (max-moves forced)
+match: 3/3 candidate wins (win rate 1.000) in 258.3s
+ELO: diff(win-rate) = 2400.0  K=32 update 0.0 -> 16.0 (delta 16.0)
+gate: win rate 1.000 >= 0.55 -> REPLACE best.pt
+history: ...omigamax-demo-history.jsonl
+RESULT: PASS (exit 0)
+
+Interpretation: the strong candidate (step 320) beats the random best 3-0, so the
+gate REPLACES models/best.pt with the candidate's full checkpoint (weights +
+optimizer + global_step). Together with the acceptance run (candidate step-20 won
+4/9 = 0.444 < 0.55 -> KEEP random baseline), both gate directions are proven live.
+
+Note: vs a passing random net, games hit the --max-moves cap (the random side
+passes every move, so two consecutive passes never occur); the position is
+force-terminated and scored per the plan's timeout protection.

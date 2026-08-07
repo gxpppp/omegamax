@@ -1,0 +1,73 @@
+{
+  "todo": 15,
+  "device": "cuda",
+  "protocol": {
+    "candidate": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\opencode\\omigamax-demo-candidate.pt",
+    "best": "models/best.pt",
+    "games": 3,
+    "sims": 40,
+    "board_size": 19,
+    "komi": 7.5,
+    "virtual_loss": 3,
+    "replace_threshold": 0.55,
+    "seed": 0,
+    "max_moves": 250,
+    "arch": {
+      "blocks": 10,
+      "channels": 128,
+      "board_size": 19
+    },
+    "candidate_global_step": 320,
+    "bootstrapped_best": false
+  },
+  "match": {
+    "games": 3,
+    "sims": 40,
+    "board_size": 19,
+    "komi": 7.5,
+    "virtual_loss": 3,
+    "threshold": 0.55,
+    "candidate_wins": 3,
+    "draws": 0,
+    "winrate": 1.0,
+    "elo_diff": 2400.0,
+    "replaced": true,
+    "wall_time_s": 258.32444039999973
+  },
+  "games_detail": [
+    {
+      "seed": 0,
+      "winner": "B",
+      "result": "B+112.5",
+      "forced_terminal": true,
+      "moves": 250,
+      "candidate_color": "B"
+    },
+    {
+      "seed": 1,
+      "winner": "W",
+      "result": "W+82.5",
+      "forced_terminal": true,
+      "moves": 250,
+      "candidate_color": "W"
+    },
+    {
+      "seed": 2,
+      "winner": "B",
+      "result": "B+96.5",
+      "forced_terminal": true,
+      "moves": 250,
+      "candidate_color": "B"
+    }
+  ],
+  "elo_update": {
+    "elo_before": 0.0,
+    "elo_delta": 16.0,
+    "elo": 16.0,
+    "elo_diff": 2400.0
+  },
+  "history": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\opencode\\omigamax-demo-history.jsonl",
+  "replaced_best": true,
+  "best_written": "models\\best.pt",
+  "accepted": true
+}

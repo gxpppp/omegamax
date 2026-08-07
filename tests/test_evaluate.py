@@ -1,0 +1,259 @@
+"""Tests for the evaluation gate and ELO recording (todo 15).
+
+Per the plan's todo-15 acceptance criteria:
+
+* **gate logic** -- fabricated win counts decide replace/keep exactly at the
+  ``replace_threshold`` = 0.55 boundary: 12/21 = 0.5714 replaces, 11/21 =
+  0.5238 keeps, and 11/20 = 0.55 replaces (the plan's 含等于替换 -- the
+  boundary is included);
+* **ELO formula** -- the standard rating difference
+  ``400 * log10(p / (1 - p))`` (plan References: Wikipedia Elo) on known win
+  rates: ``0.5 -> 0``, ``0.55 -> ~34.9``, ``0.75 -> ~190.9`` (note: a
+  constant-200 variant would give ~95.3 at p=0.75; the plan's standard-400
+  formula is what is implemented here); plus the K=32 running update
+  ``R' = R + 32 * (score - E(R))`` with ``E(0) = 0.5``;
+* **no-noise / tau=0 discipline** -- a mock of ``run_search`` /
+  ``sample_action`` proves the evaluator never applies Dirichlet root noise
+  and always selects moves at ``tau = 0`` (argmax);
+* **bootstrap** -- the first evaluation writes random-init weights to a
+  missing ``best.pt`` and re-uses them as the baseline opponent afterwards
+  (plan Oracle G1);
+* **end-to-end** -- a short real evaluation (tiny differently-seeded nets,
+  low sims) plays full legal games and reports a consistent win rate, ELO and
+  gate decision; and the full ``evaluate_and_gate`` orchestration writes
+  ``best.pt`` (replace or bootstrap) plus a JSONL history entry.
+"""
+
+import json
+
+import pytest
+import torch
+
+from omigamax.config import load_config
+from omigamax.network.features import pass_index
+from omigamax.network.model import create_model
+from omigamax.train import evaluate as ev
+from omigamax.train.loss import make_sgd_optimizer
+from omigamax.train.train import save_checkpoint
+
+SIZE = 9
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _net(seed: int = 0, blocks: int = 2, channels: int = 16, size: int = SIZE):
+    torch.manual_seed(seed)
+    return create_model(blocks=blocks, channels=channels, board_size=size).to(DEVICE).eval()
+
+
+# ---------------------------------------------------------------------------
+# the gate
+# ---------------------------------------------------------------------------
+
+class TestGate:
+    def test_12_of_21_replaces(self):
+        # 12/21 = 0.5714 >= 0.55 -> replace
+        assert ev.gate_decision(12, 21, 0.55) is True
+
+    def test_11_of_21_keeps(self):
+        # 11/21 = 0.5238 < 0.55 -> keep
+        assert ev.gate_decision(11, 21, 0.55) is False
+
+    def test_equality_boundary_replaces(self):
+        # 11/20 = 0.55 == threshold -> replace (plan: 含等于替换)
+        assert ev.gate_decision(11, 20, 0.55) is True
+
+    def test_zero_wins_keeps(self):
+        assert ev.gate_decision(0, 21, 0.55) is False
+
+    def test_all_wins_replaces(self):
+        assert ev.gate_decision(21, 21, 0.55) is True
+
+    def test_config_threshold_used(self):
+        cfg = load_config()
+        assert float(cfg["replace_threshold"]) == pytest.approx(0.55)
+        assert ev.gate_decision(12, 21, float(cfg["replace_threshold"])) is True
+        assert ev.gate_decision(11, 21, float(cfg["replace_threshold"])) is False
+
+    def test_invalid_games_keeps(self):
+        assert ev.gate_decision(5, 0, 0.55) is False
+
+
+# ---------------------------------------------------------------------------
+# ELO helpers
+# ---------------------------------------------------------------------------
+
+class TestElo:
+    def test_winrate_half_is_zero(self):
+        assert ev.elo_from_winrate(0.5) == 0.0
+
+    def test_winrate_055(self):
+        # 400*log10(0.55/0.45) = 400*log10(1.2222) ~ 34.86
+        assert ev.elo_from_winrate(0.55) == pytest.approx(34.862, abs=0.1)
+
+    def test_winrate_075(self):
+        # standard Elo: 400*log10(0.75/0.25) = 400*log10(3) ~ 190.85
+        assert ev.elo_from_winrate(0.75) == pytest.approx(190.85, abs=0.1)
+
+    def test_symmetric(self):
+        assert ev.elo_from_winrate(0.25) == pytest.approx(-ev.elo_from_winrate(0.75))
+
+    def test_clamped_at_extremes(self):
+        # all-wins / all-losses -> +/-2400, never inf
+        assert ev.elo_from_winrate(1.0) == pytest.approx(2400.0, abs=1.0)
+        assert ev.elo_from_winrate(0.0) == pytest.approx(-2400.0, abs=1.0)
+
+    def test_expected_score_equal_ratings(self):
+        assert ev.expected_score(0.0, 0.0) == pytest.approx(0.5)
+
+    def test_update_elo_k32(self):
+        # K=32: R' = R + 32*(score - 0.5) at equal ratings
+        assert ev.update_elo(0.0, 0.5) == pytest.approx(0.0)
+        assert ev.update_elo(0.0, 0.75) == pytest.approx(8.0)
+        assert ev.update_elo(0.0, 0.0) == pytest.approx(-16.0)
+
+    def test_update_elo_tracks(self):
+        # a win-rate above expectation pushes the rating up
+        r1 = ev.update_elo(0.0, 0.6)
+        r2 = ev.update_elo(r1, 0.6)
+        assert r2 > r1 > 0.0
+
+
+# ---------------------------------------------------------------------------
+# evaluation discipline: no noise, tau=0 (probed via mocks)
+# ---------------------------------------------------------------------------
+
+class TestEvaluationDiscipline:
+    def test_no_dirichlet_noise_and_tau_zero(self, monkeypatch):
+        black = _net(1)
+        white = _net(2)
+        captured = {"dirichlet_alphas": [], "temperatures": []}
+
+        class _FakeRoot:
+            def __init__(self, size):
+                self.size = size
+
+        def fake_run_search(root, network, simulations, **kwargs):
+            captured["dirichlet_alphas"].append(kwargs.get("dirichlet_alpha"))
+            return root
+
+        def fake_sample_action(root, temperature, rng=None):
+            captured["temperatures"].append(float(temperature))
+            return pass_index(root.board.size)
+
+        monkeypatch.setattr(ev, "run_search", fake_run_search)
+        monkeypatch.setattr(ev, "sample_action", fake_sample_action)
+
+        rec = ev.play_eval_game(black, white, sims=4, size=SIZE, komi=7.5,
+                                seed=3, virtual_loss=3)
+
+        # both sides searched at least once and the game finished legally
+        assert len(captured["dirichlet_alphas"]) >= 2
+        assert rec["winner"] in ("B", "W")
+        # the evaluator never applies Dirichlet root noise (always None)
+        assert all(alpha is None for alpha in captured["dirichlet_alphas"])
+        # every move is selected at tau = 0 (argmax)
+        assert len(captured["temperatures"]) == len(captured["dirichlet_alphas"])
+        assert all(t == 0.0 for t in captured["temperatures"])
+
+    def test_eval_games_never_written_to_buffer(self, monkeypatch):
+        """Evaluation must not touch the replay buffer (plan Must-NOT)."""
+        # play_eval_game takes only networks -- no data_dir/keep anywhere in
+        # the evaluate module's game path.
+        src = open(ev.__file__, "r", encoding="utf-8").read()
+        assert "data/selfplay" not in src
+        assert "save_game_npz" not in src
+
+
+# ---------------------------------------------------------------------------
+# bootstrap
+# ---------------------------------------------------------------------------
+
+class TestBootstrap:
+    def test_first_eval_bootstraps_random_best(self, tmp_path):
+        cfg = load_config()
+        arch = {"blocks": 1, "channels": 8, "board_size": SIZE}
+        best_path = tmp_path / "best.pt"
+        assert not best_path.exists()
+
+        model, bootstrapped = ev.ensure_best_model(best_path, arch, cfg, DEVICE)
+        assert bootstrapped is True
+        assert best_path.exists()
+
+        # a second call loads the existing baseline (not a fresh one)
+        model2, bootstrapped2 = ev.ensure_best_model(best_path, arch, cfg, DEVICE)
+        assert bootstrapped2 is False
+        for p1, p2 in zip(model.parameters(), model2.parameters()):
+            torch.testing.assert_close(p1.detach().cpu(), p2.detach().cpu())
+
+
+# ---------------------------------------------------------------------------
+# a short real evaluation, end to end
+# ---------------------------------------------------------------------------
+
+class TestShortRealEvaluation:
+    def test_full_evaluation_gate_end_to_end(self):
+        candidate = _net(11)
+        best = _net(22)  # differently-seeded tiny nets
+        report = ev.run_evaluation(
+            candidate, best, load_config(),
+            games=3, sims=4, size=SIZE, komi=7.5, virtual_loss=3,
+            seed=5, max_moves=120,
+        )
+        assert report["games"] == 3
+        assert report["sims"] == 4
+        assert 0 <= report["winrate"] <= 1.0
+        assert report["candidate_wins"] in (0, 1, 2, 3)
+        assert report["draws"] == 0  # komi 7.5 => no jigo
+        # the gate decision is consistent with the win count
+        assert report["replaced"] == ev.gate_decision(
+            report["candidate_wins"], report["games"], report["threshold"])
+        # ELO diff consistent with the win rate
+        assert report["elo_diff"] == pytest.approx(
+            ev.elo_from_winrate(report["winrate"]), abs=0.001)
+        # colours alternate: candidate black on even games, white on odd
+        for i, rec in enumerate(report["games_detail"]):
+            assert rec["winner"] in ("B", "W")
+            assert rec["candidate_color"] == ("B" if i % 2 == 0 else "W")
+            assert rec["moves"] > 0
+            assert isinstance(rec["result"], str)
+
+
+class TestEvaluateAndGate:
+    def test_full_orchestration_with_history(self, tmp_path):
+        torch.manual_seed(0)
+        model = create_model(2, 16, SIZE).to(DEVICE)
+        opt = make_sgd_optimizer(model, lr=0.2, momentum=0.9, l2=1e-4)
+        candidate_path = tmp_path / "latest.pt"
+        save_checkpoint(candidate_path, model, opt, global_step=7,
+                        config={"lr": 0.2, "momentum": 0.9, "l2": 1e-4})
+        best_path = tmp_path / "best.pt"
+        history = tmp_path / "eval_history.jsonl"
+
+        result = ev.evaluate_and_gate(
+            candidate_path, best_path, load_config(),
+            games=2, sims=3, size=SIZE, komi=7.5, seed=9,
+            device=DEVICE, history_path=history,
+        )
+        assert best_path.exists()  # bootstrapped
+        assert result["protocol"]["bootstrapped_best"] is True
+        assert result["protocol"]["candidate_global_step"] == 7
+        # best.pt is written iff the gate replaced
+        assert (result["best_written"] == str(best_path)) == result["replaced_best"]
+
+        lines = [json.loads(l) for l in
+                 history.read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert len(lines) == 1
+        entry = lines[0]
+        assert entry["event"] == "evaluate_gate"
+        assert entry["games"] == 2
+        assert entry["global_step"] == 7
+        assert entry["elo_before"] == 0.0
+        assert entry["elo"] == pytest.approx(entry["elo_before"] + entry["elo_delta"])
+
+    def test_read_last_elo_empty_and_after_append(self, tmp_path):
+        hp = tmp_path / "eval_history.jsonl"
+        assert ev.read_last_elo(hp) == 0.0
+        ev.append_eval_history({"event": "x", "elo": 12.5}, hp)
+        assert ev.read_last_elo(hp) == 12.5
+        ev.append_eval_history({"event": "x", "elo": 7.25}, hp)
+        assert ev.read_last_elo(hp) == 7.25

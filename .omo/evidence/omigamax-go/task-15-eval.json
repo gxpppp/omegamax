@@ -1,0 +1,121 @@
+{
+  "todo": 15,
+  "device": "cuda",
+  "protocol": {
+    "candidate": "models\\latest.pt",
+    "best": "models\\best.pt",
+    "games": 9,
+    "sims": 40,
+    "board_size": 19,
+    "komi": 7.5,
+    "virtual_loss": 3,
+    "replace_threshold": 0.55,
+    "seed": 0,
+    "max_moves": 1000,
+    "arch": {
+      "blocks": 10,
+      "channels": 128,
+      "board_size": 19
+    },
+    "candidate_global_step": 20,
+    "bootstrapped_best": true
+  },
+  "match": {
+    "games": 9,
+    "sims": 40,
+    "board_size": 19,
+    "komi": 7.5,
+    "virtual_loss": 3,
+    "threshold": 0.55,
+    "candidate_wins": 4,
+    "draws": 0,
+    "winrate": 0.4444444444444444,
+    "elo_diff": -38.764,
+    "replaced": false,
+    "wall_time_s": 420.3976541000011
+  },
+  "games_detail": [
+    {
+      "seed": 0,
+      "winner": "W",
+      "result": "W+368.5",
+      "forced_terminal": false,
+      "moves": 78,
+      "candidate_color": "B"
+    },
+    {
+      "seed": 1,
+      "winner": "W",
+      "result": "W+41.5",
+      "forced_terminal": false,
+      "moves": 162,
+      "candidate_color": "W"
+    },
+    {
+      "seed": 2,
+      "winner": "W",
+      "result": "W+368.5",
+      "forced_terminal": false,
+      "moves": 78,
+      "candidate_color": "B"
+    },
+    {
+      "seed": 3,
+      "winner": "W",
+      "result": "W+119.5",
+      "forced_terminal": false,
+      "moves": 304,
+      "candidate_color": "W"
+    },
+    {
+      "seed": 4,
+      "winner": "W",
+      "result": "W+368.5",
+      "forced_terminal": false,
+      "moves": 52,
+      "candidate_color": "B"
+    },
+    {
+      "seed": 5,
+      "winner": "W",
+      "result": "W+41.5",
+      "forced_terminal": false,
+      "moves": 174,
+      "candidate_color": "W"
+    },
+    {
+      "seed": 6,
+      "winner": "W",
+      "result": "W+368.5",
+      "forced_terminal": false,
+      "moves": 14,
+      "candidate_color": "B"
+    },
+    {
+      "seed": 7,
+      "winner": "W",
+      "result": "W+112.5",
+      "forced_terminal": false,
+      "moves": 296,
+      "candidate_color": "W"
+    },
+    {
+      "seed": 8,
+      "winner": "W",
+      "result": "W+368.5",
+      "forced_terminal": false,
+      "moves": 42,
+      "candidate_color": "B"
+    }
+  ],
+  "elo_update": {
+    "elo_before": 0.0,
+    "elo_delta": -1.778,
+    "elo": -1.778,
+    "elo_diff": -38.764
+  },
+  "history": "logs/eval_history.jsonl",
+  "replaced_best": false,
+  "best_written": null,
+  "accepted": true
+}

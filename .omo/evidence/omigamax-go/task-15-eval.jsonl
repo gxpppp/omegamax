@@ -1,0 +1,1 @@
+{"event": "evaluate_gate", "timestamp": "2026-08-07T11:05:54", "candidate": "models\\latest.pt", "best": "models\\best.pt", "global_step": 20, "bootstrapped_best": true, "games": 9, "sims": 40, "candidate_wins": 4, "winrate": 0.444444, "threshold": 0.55, "replaced_best": false, "best_written": null, "elo_before": 0.0, "elo_delta": -1.778, "elo": -1.778, "elo_diff": -38.764}
