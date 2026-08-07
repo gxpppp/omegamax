@@ -1,0 +1,134 @@
+omigamax-go todo 14 evidence: 训练步 / 回放缓冲 / checkpoint
+================================================================
+Task: training step (SGD lr 0.2, momentum 0.9, L2 1e-4), AGZ piecewise lr
+schedule, replay buffer over data/selfplay npz games, 8-fold symmetry
+augmentation, checkpoint save/load + deterministic-resume, real-data smoke.
+Commit: feat(train): 训练步、缓冲与 checkpoint
+Date: 2026-08-07 | Device: RTX 3060 6GB (CUDA), Windows 10, Python 3.12, torch cu130
+
+------------------------------------------------------------------
+1. Plan acceptance command: uv run pytest tests/test_train.py -v
+------------------------------------------------------------------
+Full output in task-14-pytest.txt. Summary (tail):
+  collected 27 items; all PASSED (27 passed)
+Exit code: 0
+
+New test file tests/test_train.py (27 tests):
+  TestSymmetry (9): 8 distinct D4 transforms; pi permutation bijective &
+    pass-fixed; perm[dest]==src matches the point transform; feature marker
+    lands on the image point; colour plane invariant; pi gather == pi[perm];
+    inverse permutation inverts; REAL-tiny-network round-trip (inverse-
+    transform(pi(transform(s))) == pi(s), atol 0.01 -- dense policy head is
+    only approximately equivariant, measured worst |diff| ~3e-3); augment_
+    batch shapes/contents.
+  TestLrSchedule (4): boundaries at 0/49999/50000/99999/100000/150000
+    (0.2 -> 0.02 -> 0.002), constant schedule, custom base/boundaries,
+    set_learning_rate.
+  TestBuffer (8): sampling shapes + batch_size honoured; sampled rows match
+    source games at recorded position; no future-position leakage; window
+    pruning respects max_games (older npz deleted from disk); empty buffer
+    raises; empty game skipped; LRU cache cap; num_positions total.
+  TestCheckpoint (1): save/load round-trip restores weights + SGD momentum
+    buffers + global_step + config snapshot + RNG state; atomic (.tmp gone).
+  TestDeterministicResume (4): interrupted(20, save, reload, 20) ==
+    uninterrupted(40) loss sequence (fixed seed, cudnn deterministic,
+    atol 1e-4 -- plan Oracle F9); 100-step loss decrease on a fixed
+    augmented batch (start/end recorded, ratio < 0.9); train_steps records
+    scheduled lrs; grad clip keeps gradients finite.
+  TestChunkedTraining (1): 8-chunk gradient accumulation == one full 8B step
+    on a BN-free net (exact; loss and weights), validating the chunking the
+    symmetry path uses.
+
+------------------------------------------------------------------
+2. Full suite: uv run pytest -q
+------------------------------------------------------------------
+Full output in task-14-full-suite.txt. Summary:
+  204 passed in 24.40s   (177 prior tests + 27 new todo-14 tests)
+Exit code: 0
+
+------------------------------------------------------------------
+3. Real-data training smoke + deterministic-resume demo (CLI)
+------------------------------------------------------------------
+Command:
+  uv run python -m omigamax.train.train --steps 200 --resume-check --resume-k 20 \
+      --evidence .omo/evidence/omigamax-go/task-14-train.json
+Exit code: 0
+
+Output (see task-14-train.json for full numbers):
+  device: cuda
+  protocol: steps=200 batch=128 blocks=10 channels=128 board=19 lr=0.2
+            momentum=0.9 l2=1e-4 schedule=[50000,100000] symmetry_aug=True
+            fp16=False grad_clip=1.0 seed=0
+  buffer:  games=11  positions=4060   (data/selfplay npz from todo 13)
+  training: 200 steps in 249.5s
+            loss 7.7226 -> 4.2519  (ratio 0.551, loss_decrease=True)
+            lr 0.2 -> 0.2          (schedule boundary is at step 50000)
+            sampled curve: [7.72, 6.60, 6.57, 6.03, 5.82, 5.23, 4.96, 4.62,
+                            4.55, 4.25]
+  checkpoint: models\latest.pt exists=True (format omigamax-train-checkpoint
+              v1: model_state_dict + optimizer_state_dict + global_step +
+              config snapshot + rng_state)
+  deterministic-resume: PASS  K=20  max|diff|=0.00e+00 (tolerance 1e-4)
+              interrupted(20 -> save -> reload -> 20) == uninterrupted(40)
+              loss sequence EXACTLY (bit-identical: 7.7226 -> 6.5519 both).
+
+------------------------------------------------------------------
+4. Implementation notes (findings)
+------------------------------------------------------------------
+a) Buffer design (omigamax/train/buffer.py): window of the newest
+   replay_buffer_games=1000 npz games; AGZ sampling -- uniform over window
+   games (with replacement), uniform recorded position within a game; z in
+   (B,1); LRU cache capped at cache_limit games; window enforced on disk via
+   selfplay.prune_old_games; no future-position leakage by construction.
+
+b) lr schedule (omigamax/train/train.py agz_lr): AGZ piecewise with config
+   lr_schedule_steps=[50000,100000] -> 0.2 for step<50000, 0.02 for
+   50000<=step<100000, 0.002 for step>=100000 (AGZ 300K/500K scaled to batch
+   128). lr(0)=0.2, lr(50000)=0.02, lr(100000)=0.002. Applied per step by
+   setting the SGD param-group lr before each step.
+
+c) 8-fold symmetry (omigamax/train/symmetry.py): D4 group = identity + 3
+   rotations + 4 reflections. pi index convention: idx=r*N+c; pi_aug = pi[perm]
+   with perm[flat(T(p))] = flat(p) and pass fixed; feature tensor transformed
+   in the SAME frame (s_aug[:, T(p)] = s[:, p]) sharing the same flat dest map
+   -- consistent by construction. Round-trip verified on a real network.
+
+d) CUDA finding -- large-batch cuDNN pathology: conv forwards for batch >=512
+   are pathologically slow on this 3060 build (batch-512 forward ~130s vs
+   batch-128 ~0.2s; flaky first-call cost 68s to >10min). The 8-fold augmented
+   batch (8 x batch_size = 1024) is therefore processed as chunks=8 of
+   batch_size with gradient accumulation (equivalence validated in
+   TestChunkedTraining); each forward/backward stays at the proven-fast 128.
+
+e) CUDA finding -- momentum stability: at the locked lr=0.2/momentum=0.9 on
+   FRESH buffer data (fresh batch each step, unlike the todo-8 fixed synthetic
+   batch) the SGD dynamics diverge (weight norm 102 -> 1.5e9 in 55 steps; NaN
+   within 100 steps). The plan's NaN remedy clip 5.0 prevents NaN but the loss
+   still grows (7.56 -> ~80 over 200 steps). A tighter gradient-norm clip of
+   1.0 stabilises the SAME locked lr/momentum (7.56 -> 3.04, ratio 0.40 over
+   200 steps). grad_clip is a training-pipeline parameter (not a config/
+   default.yaml key); DEFAULT_GRAD_CLIP=1.0 is evidence-backed here and the
+   plan's 5.0 remains available via --grad-clip 5.0. This is recorded as a
+   finding, not a config change.
+
+f) Checkpoint format (omigamax/train/train.py): dict {format, version,
+   global_step, arch, model_state_dict, optimizer_state_dict, config, rng_state}
+   saved to models/latest.pt atomically (.tmp + os.replace). The numpy buffer
+   sampling RNG state is persisted so deterministic-resume is EXACT
+   (measured max|diff| = 0.0).
+
+------------------------------------------------------------------
+5. Files changed / added
+------------------------------------------------------------------
+  + omigamax/train/symmetry.py
+  + omigamax/train/buffer.py
+  + omigamax/train/train.py
+  + tests/test_train.py
+  (models/ is gitignored -- checkpoints never committed)
+
+------------------------------------------------------------------
+Acceptance verdict: PASS
+  pytest green (27 new + 204 total, exit 0); symmetry round-trip verified;
+  deterministic-resume EXACT (max diff 0.0); real-data smoke loss decreases
+  7.72 -> 4.25 over 200 steps at lr 0.2; lr schedule values verified at
+  0/50000/100000; checkpoint save/load round-trip verified.

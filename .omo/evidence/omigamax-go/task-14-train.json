@@ -1,0 +1,86 @@
+{
+  "todo": 14,
+  "device": "cuda",
+  "protocol": {
+    "steps": 200,
+    "batch_size": 128,
+    "blocks": 10,
+    "channels": 128,
+    "board_size": 19,
+    "lr": 0.2,
+    "momentum": 0.9,
+    "l2": 0.0001,
+    "lr_schedule_steps": [
+      50000,
+      100000
+    ],
+    "symmetry_aug": true,
+    "fp16": false,
+    "grad_clip": 1.0,
+    "seed": 0,
+    "replay_buffer_games": 1000,
+    "data_dir": "data/selfplay"
+  },
+  "buffer": {
+    "num_games": 11,
+    "num_positions": 4060
+  },
+  "training": {
+    "wall_time_s": 249.52423270000145,
+    "loss_first": 7.722571611404419,
+    "loss_last": 4.251924514770508,
+    "loss_decrease": true,
+    "loss_ratio_last_first": 0.5505840189932868,
+    "lr_first": 0.2,
+    "lr_last": 0.2,
+    "final_global_step": 200,
+    "sample_every": [
+      0,
+      22,
+      44,
+      66,
+      88,
+      111,
+      133,
+      155,
+      177,
+      199
+    ],
+    "losses_sampled": [
+      7.722572,
+      6.59566,
+      6.569909,
+      6.03452,
+      5.817229,
+      5.228022,
+      4.956408,
+      4.623187,
+      4.54897,
+      4.251925
+    ]
+  },
+  "checkpoint": {
+    "path": "models\\latest.pt",
+    "exists": true,
+    "format": "omigamax-train-checkpoint",
+    "version": 1
+  },
+  "resume_check": {
+    "passed": true,
+    "tolerance": 0.0001,
+    "k": 20,
+    "seed": 0,
+    "interrupted_steps": 40,
+    "uninterrupted_steps": 40,
+    "max_abs_diff": 0.0,
+    "interrupted_first": 7.722571611404419,
+    "interrupted_last": 6.5519256591796875,
+    "uninterrupted_first": 7.722571611404419,
+    "uninterrupted_last": 6.5519256591796875,
+    "step_after_save": 20,
+    "step_restored": 20,
+    "step_final": 40,
+    "checkpoint": "models\\latest.pt"
+  },
+  "accepted": true
+}
