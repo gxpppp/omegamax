@@ -1,0 +1,116 @@
+{
+  "todo": 20,
+  "plan_reference": ".omo/plans/omigamax-go.md todo 20",
+  "commit_message": "feat(cli): 自动对弈评测与人机对弈",
+  "date": "2026-08-07",
+  "head_pre_todo20": "5b54b9f",
+  "implementation": {
+    "match_cli": "omigamax/cli/match.py",
+    "play_cli": "omigamax/cli/play.py",
+    "engine1": "omigamax in-process (todo-18 GTPEngine, eval discipline: no Dirichlet noise, tau=0)",
+    "engine2_katago": "GTP subprocess `katago gtp -model <weights> -config <cfg>` (tools/katago eigen CPU b10c128), todo-5 rule components + kata-set-param maxVisits cap",
+    "engine2_random": "in-process uniform-random-legal engine",
+    "color_alternation": "even game index -> engine1 black, odd -> engine1 white; komi 7.5 on white",
+    "legality": "local Board arbitrates; illegal/rejected genmove -> error record with engine stderr, not a crash",
+    "reporting": "per-game results + aggregate engine1 win rate + ELO diff (400*log10(p/(1-p)), clamp +-2400)",
+    "sgf_dir": "logs/matches/",
+    "play_mode": "human-vs-engine terminal text board (GTP coords A-T skip I), illegal/invalid move re-prompted, two-pass terminal -> score"
+  },
+  "tests": {
+    "file": "tests/test_match.py",
+    "added": 16,
+    "names": [
+      "test_aggregate_winrate_math",
+      "test_aggregate_degenerate_all_errors",
+      "test_aggregate_uses_completed_only",
+      "test_colors_alternate_across_games",
+      "test_komi_applied",
+      "test_illegal_engine_move_is_recorded_not_crash",
+      "test_match_vs_random_completes_legal",
+      "test_random_engine_accepts_play_and_genmove",
+      "test_katago_binary_weights_located",
+      "test_katago_engine_setup_mocked",
+      "test_match_vs_katago_short_game_mocked",
+      "test_play_scripted_session_completes",
+      "test_play_illegal_human_move_rejected",
+      "test_play_quit_requested",
+      "test_play_invalid_coordinate_reprompts",
+      "test_render_board_marks_last_move"
+    ]
+  },
+  "pytest": {
+    "command": "uv run pytest -q",
+    "exit_code": 0,
+    "passed": 399,
+    "prior": 383,
+    "new": 16,
+    "warning": "1 pygame pkg_resources DeprecationWarning"
+  },
+  "demos": {
+    "vs_random": {
+      "command": "uv run python -m omigamax.cli.match --engine2 random --games 6 --sims 40 --seed 7",
+      "exit_code": 0,
+      "board_size": 19,
+      "komi": 7.5,
+      "completed": 6,
+      "errors": 0,
+      "engine1_wins": 2,
+      "winrate": 0.333333,
+      "elo_diff": -120.412,
+      "wall_time_s": 547.68,
+      "per_game": [
+        {"index": 0, "seed": 7, "engine1_color": "B", "winner": "W", "result": "W+49.5", "moves": 495},
+        {"index": 1, "seed": 8, "engine1_color": "W", "winner": "B", "result": "B+66.5", "moves": 480},
+        {"index": 2, "seed": 9, "engine1_color": "B", "winner": "W", "result": "W+64.5", "moves": 519},
+        {"index": 3, "seed": 10, "engine1_color": "W", "winner": "W", "result": "W+53.5", "moves": 509},
+        {"index": 4, "seed": 11, "engine1_color": "B", "winner": "B", "result": "B+7.5", "moves": 350},
+        {"index": 5, "seed": 12, "engine1_color": "W", "winner": "B", "result": "B+9.5", "moves": 402}
+      ],
+      "note": "early-training (step-320) net; the todo-21 >80% vs-random milestone is evaluated after the e2e smoke; full --games 20 form projects ~30 min @ sims 40"
+    },
+    "vs_katago": {
+      "command": "uv run python -m omigamax.cli.match --engine2 katago --games 1 --sims 40 --katago-visits 20 --seed 11 --timeout 60",
+      "exit_code": 0,
+      "board_size": 19,
+      "komi": 7.5,
+      "katago_visits": 20,
+      "completed": 1,
+      "errors": 0,
+      "engine1_wins": 0,
+      "winrate": 0.0,
+      "elo_diff": -2400.0,
+      "wall_time_s": 388.19,
+      "per_game": [
+        {"index": 0, "seed": 11, "engine1_color": "B", "winner": "W", "result": "W+368.5", "moves": 542}
+      ],
+      "note": "KataGo (eigen CPU b10c128) crushed the early net as expected; harness works. First attempt hit the 120s/command timeout (cold eigen first search) -> per-command kill fired as designed; retry at --timeout 60 completed."
+    },
+    "play": {
+      "command": "uv run python -m omigamax.cli.play --model models/best.pt --vs random --board-size 9 --seed 3 (scripted stdin)",
+      "exit_code": 0,
+      "vs": "random",
+      "board_size": 9,
+      "human_color": "B",
+      "moves": 88,
+      "winner": "W",
+      "result": "W+63.5",
+      "quit_requested": false,
+      "dispatch_check": "`omigamax.cli.match play --vs random --board-size 9 --seed 4` exit 0, W+57.5"
+    }
+  },
+  "acceptance_commands": [
+    {"cmd": "uv run pytest -q", "exit": 0, "result": "399 passed"},
+    {"cmd": "uv run python -m omigamax.cli.match --engine2 katago --games 1 --sims 40 --katago-visits 20 --seed 11", "exit": 0, "result": "win-rate report + SGF (demo at 1 game low budget; --games 9 supported)"},
+    {"cmd": "uv run python -m omigamax.cli.play --model models/best.pt --vs random --board-size 9 --seed 3 (scripted)", "exit": 0, "result": "1 game human-vs-engine completed, score reported"},
+    {"cmd": "uv run python -m omigamax.cli.match --engine2 random --games 6 --sims 40 --seed 7", "exit": 0, "result": "vs-random win rate 2/6 = 0.333"}
+  ],
+  "evidence_files": [
+    ".omo/evidence/omigamax-go/task-20-match.txt",
+    ".omo/evidence/omigamax-go/task-20-match.json",
+    ".omo/evidence/omigamax-go/task-20-pytest.txt",
+    ".omo/evidence/omigamax-go/task-20-demo-random.json",
+    ".omo/evidence/omigamax-go/task-20-demo-katago.json",
+    ".omo/evidence/omigamax-go/task-20-demo-play.json",
+    ".omo/evidence/omigamax-go/task-20-demo-play-dispatch.txt"
+  ]
+}

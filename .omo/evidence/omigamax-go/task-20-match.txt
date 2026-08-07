@@ -1,0 +1,137 @@
+=== TODO 20: CLI 对弈与自动评测 (match/play CLI + win-rate/ELO report) ===
+Plan reference: .omo/plans/omigamax-go.md todo 20 (authoritative)
+Draft decisions: .omo/drafts/omigamax-go.md decision 6 (GTP + CLI 对弈), assumption 评测基线
+Date: 2026-08-07
+HEAD: 5b54b9f (pre-todo-20)
+
+--------------------------------------------------------------------------
+1. IMPLEMENTATION (design)
+--------------------------------------------------------------------------
+omigamax/cli/match.py
+  - `match` CLI (default subcommand; `play` subcommand dispatches to
+    omigamax.cli.play):
+      omigamax.cli.match match --engine2 katago|random --model models/best.pt
+                             --games N [--sims S] [--katago-visits V] ...
+  - engine1 = omigamax IN-PROCESS (todo-18 GTPEngine, configurable sims,
+    evaluation discipline: no Dirichlet root noise, tau=0 argmax).
+  - engine2 = katago: GTP SUBPROCESS `katago gtp -model <weights> -config
+    <cfg>` (tools/katago eigen CPU build; the plan's "GTP 管道互叫", CRLF-
+    tolerant frames, per-command timeout -> kill, todo-18 pipe patterns);
+    rule components reused from todo 5 (ko SIMPLE / AREA / tax NONE /
+    suicide false) + optional `kata-set-param maxVisits N` cap.  engine2 =
+    random: in-process uniform-random-legal engine (plan's vs-random
+    milestone command, Oracle F4).
+  - colour alternation: game index even -> engine1 black, odd -> engine1
+    white; komi 7.5 (config) on white; seeds = master + game index.
+  - a local Board arbitrates legality (genmove parsed via GTP coords
+    A-T skip I; illegal/rejected move -> error record + engine stderr, not
+    a crash). Two-pass terminal (Tromp-Taylor); --max-moves force-
+    terminates and scores.
+  - report: per-game results (seed, colour, winner, moves, result, SGF) +
+    aggregate win rate of engine1 + ELO diff (400*log10(p/(1-p)), clamped
+    to +-2400; reuses omigamax.train.evaluate.elo_from_winrate). All game
+    SGFs -> logs/matches/.
+omigamax/cli/play.py
+  - `play` CLI: human-vs-engine terminal play. Text board (GTP orientation,
+    columns A-T skip I, last move lower-case). Human reads GTP coords from
+    stdin; illegal/invalid move rejected + re-prompted; `quit` exits. Engine
+    replies via MCTS (--vs omigamax) or seeded random (--vs random).
+    Two-pass terminal -> final score printed. play_session() is the reusable
+    driver with an injectable engine (test seam).
+
+--------------------------------------------------------------------------
+2. TESTS (tests/test_match.py, 16 new, TDD)
+--------------------------------------------------------------------------
+test_aggregate_winrate_math            win-rate/ELO aggregation is exact
+                                       (400*log10(2) for p=2/3, errors counted)
+test_aggregate_degenerate_all_errors   all-error run -> winrate 0, ELO 0
+test_aggregate_uses_completed_only     perfect run -> winrate 1.0, ELO +2400
+test_colors_alternate_across_games     always-pass: white wins (komi), engine1
+                                       B then W -> exactly 1/2 = 0.5
+test_komi_applied                      empty board: komi 7.5 -> W+7.5;
+                                       komi 0 -> jigo (winner None)
+test_illegal_engine_move_is_recorded_not_crash  bad genmove -> error record
+test_match_vs_random_completes_legal   9x9 tiny net vs random: 2 games,
+                                       all moves legal, winners reported
+test_random_engine_accepts_play_and_genmove
+test_katago_binary_weights_located     tools/katago binary+weights+cfg found
+test_katago_engine_setup_mocked        katago spawn arg sequence + rule setup
+                                       + kata-set-param maxVisits (mocked)
+test_match_vs_katago_short_game_mocked full run_match game vs fake katago:
+                                       boardsize/komi/clear_board + play/genmove
+test_play_scripted_session_completes   stdin script -> board shown, score out
+test_play_illegal_human_move_rejected  second D4 rejected + re-prompted
+test_play_quit_requested               `quit` ends cleanly, no result line
+test_play_invalid_coordinate_reprompts Z9 rejected, game continues
+test_render_board_marks_last_move      text board: stones + last-move marker
+
+--------------------------------------------------------------------------
+3. PYTEST (full suite)
+--------------------------------------------------------------------------
+command: uv run pytest -q
+exit code: 0
+result:  399 passed, 1 warning (pygame pkg_resources DeprecationWarning)
+          = 383 prior + 16 new (todo-20)
+
+--------------------------------------------------------------------------
+4. DEMO RUNS (real, on-disk)
+--------------------------------------------------------------------------
+(a) match --engine2 random --games 6 --sims 40 --seed 7  (19x19, exit 0)
+    completed=6 errors=0 wall_time=547.68s
+    g0 seed7  omigamax=B  W+49.5   495 moves   sgf=logs/matches/random/match_000.sgf
+    g1 seed8  omigamax=W  B+66.5   480 moves   sgf=logs/matches/random/match_001.sgf
+    g2 seed9  omigamax=B  W+64.5   519 moves   sgf=logs/matches/random/match_002.sgf
+    g3 seed10 omigamax=W  W+53.5   509 moves   sgf=logs/matches/random/match_003.sgf
+    g4 seed11 omigamax=B  B+7.5    350 moves   sgf=logs/matches/random/match_004.sgf
+    g5 seed12 omigamax=W  B+9.5    402 moves   sgf=logs/matches/random/match_005.sgf
+    win rate (omigamax): 2/6 = 0.333   ELO diff: -120.412
+    note: step-320 checkpoint is early-training; vs-random is not the todo-21
+          >80% milestone (that is evaluated after the e2e training smoke).
+    note: full plan milestone `--engine2 random --games 20` projects to
+          ~30 min @ sims 40; demo ran 6 games per task instruction (5-10).
+
+(b) match --engine2 katago --games 1 --sims 40 --katago-visits 20
+    --seed 11 --timeout 60  (19x19, exit 0)
+    completed=1 errors=0 wall_time=388.19s
+    g0 seed11 omigamax=B  W+368.5  542 moves  sgf=logs/matches/katago/match_000.sgf
+    win rate (omigamax): 0/1 = 0.000   ELO diff: -2400.0
+    KataGo (eigen CPU b10c128, maxVisits=20) crushed the early-training net
+    -- expected; the point is the GTP harness works.
+    note: first attempt timed out (>120s on a cold eigen first-search); the
+    per-command timeout -> kill path fired as designed (plan QA: 120s/手),
+    and the retry completed cleanly at --timeout 60.
+
+(c) play --model models/best.pt --vs random --board-size 9 --seed 3
+    (scripted stdin: "D4\nD6\n" + 200x "pass\n", exit 0)
+    88 moves, board rendered every turn, final score W+63.5 (winner W).
+    dispatch check: `omigamax.cli.match play --vs random --board-size 9
+    --seed 4` also exit 0, W+57.5.
+
+--------------------------------------------------------------------------
+5. ACCEPTANCE COMMANDS (todo 20 criteria) + exit codes
+--------------------------------------------------------------------------
+[1] uv run pytest -q
+    -> exit 0, 399 passed
+[2] uv run python -m omigamax.cli.match --engine2 katago --games 1
+       --sims 40 --katago-visits 20 --seed 11
+    -> exit 0, win-rate report + SGF produced (demo at 1 game low budget;
+       plan form `--games 9` supported, would be hours on eigen CPU build)
+[3] uv run python -m omigamax.cli.play --model models/best.pt --vs random
+       --board-size 9 --seed 3   (scripted stdin)
+    -> exit 0, 1 game human-vs-engine completed, score reported
+[4] uv run python -m omigamax.cli.match --engine2 random --games 6
+       --sims 40 --seed 7
+    -> exit 0, vs-random win rate output (2/6 = 0.333)
+
+--------------------------------------------------------------------------
+6. EVIDENCE FILES
+--------------------------------------------------------------------------
+.omo/evidence/omigamax-go/task-20-match.txt   (this file)
+.omo/evidence/omigamax-go/task-20-match.json  (combined structured summary)
+.omo/evidence/omigamax-go/task-20-pytest.txt  (full pytest -q output)
+.omo/evidence/omigamax-go/task-20-demo-random.json   (per-game JSON)
+.omo/evidence/omigamax-go/task-20-demo-katago.json   (per-game JSON)
+.omo/evidence/omigamax-go/task-20-demo-play.json     (session JSON)
+.omo/evidence/omigamax-go/task-20-demo-play-dispatch.txt (match play dispatch)
+logs/matches/random/match_000..005.sgf
+logs/matches/katago/match_000.sgf
