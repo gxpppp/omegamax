@@ -299,12 +299,16 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: "str | Path", map_location: str = "cpu") -> dict:
-    """Load a checkpoint written by :func:`save_checkpoint` (dict)."""
+    """Load a checkpoint written by :func:`save_checkpoint` (dict).
+
+    ``weights_only=True`` (never the unsafe ``False`` fallback): the
+    checkpoints this repo writes hold only tensors and plain JSON-able
+    values (``config`` / ``extra`` / ``rng_state``), so an exotic or
+    corrupted file raises loudly instead of silently deserializing
+    arbitrary objects.
+    """
     path = Path(path)
-    try:
-        return torch.load(path, map_location=map_location, weights_only=True)
-    except Exception:  # pragma: no cover - defensive fallback for exotic states
-        return torch.load(path, map_location=map_location, weights_only=False)
+    return torch.load(path, map_location=map_location, weights_only=True)
 
 
 def restore_from_checkpoint(

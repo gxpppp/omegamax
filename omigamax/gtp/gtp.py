@@ -43,11 +43,15 @@ produce unbounded frames.
 
 Handicap (``fixed_handicap`` etc.): the standard star-point placement, black
 stones; after handicap it is *white* to move (the engine tracks the handicap
-count so the mover stays correct). The MCTS tree itself derives the
-side-to-move from move-count parity, so in a handicap position the search's
-perspective can differ from the requested colour -- :meth:`GTPEngine.genmove`
-therefore validates its sampled action against the requested colour and falls
-back to the most-visited child that is legal for it.
+count so the mover stays correct). The MCTS tree's side-to-move is derived
+from move-count parity, which disagrees with the true mover when the handicap
+has an EVEN number of stones (the board then holds an even count of BLACK
+stones, so parity says black to play). :meth:`GTPEngine._genmove` therefore
+threads the requested colour into the search root (:func:`make_root`'s
+``color`` parameter), so the legal-move mask, the value perspective and the
+colour plane fed to the network all reflect the true mover; the per-move
+legality validation in :meth:`GTPEngine._legalize_action` is kept as a
+defensive check.
 
 SGF export: ``printsgf <file>`` writes the current game (plan: SGF 导出 对局后).
 
@@ -262,6 +266,7 @@ class GTPEngine:
         self._network: "torch.nn.Module | None" = None
         self._evaluator = None
         self._handicap = 0
+        self._last_root = None  # the most recent search root (testable probe)
         self._time_settings: "dict | None" = None
         self._time_left: dict = {}
         self.chat_log: "list[tuple[str, str]]" = []
@@ -341,10 +346,12 @@ class GTPEngine:
     def _legalize_action(self, action: int, color: int, root) -> "tuple[int, int] | None":
         """Return the move for ``color`` that ``action`` maps to.
 
-        The search root derives the side-to-move from move-count parity, which
-        can differ from the requested colour in handicap positions -- so the
-        sampled action is validated against the requested colour and, if
-        illegal, falls back to the most-visited child that is legal for it.
+        The search root is built with the *requested* colour as its side to
+        move (:meth:`_genmove` threads ``color`` into :func:`make_root`), so
+        the sampled action is already from ``color``'s legal mask. This
+        validation remains as a defensive check: if the action is ever not
+        legal for ``color`` (protocol misuse, a stale root) it falls back to
+        the most-visited child that is legal.
         """
         size = self.size
 
@@ -374,12 +381,20 @@ class GTPEngine:
         elif self._network is None:
             move = self._genmove_random(color)
         else:
-            root = make_root(self.board)
+            # Thread the requested colour as the search root's side to move:
+            # after an EVEN fixed handicap (2/4/6/8) the board holds an even
+            # number of BLACK stones, so move-count parity would (wrongly)
+            # make the tree play as BLACK -- wrong legal mask, wrong value
+            # perspective and a wrong colour plane 16. The explicit colour
+            # keeps the search on the true mover (odd handicaps coincide with
+            # parity and are unaffected).
+            root = make_root(self.board, color=color)
             run_search(
                 root, None, self.simulations,
                 evaluator=self._evaluator, komi=self.komi, c_puct=self.c_puct,
                 virtual_loss=self.virtual_loss, batch_size=self.leaf_batch,
             )  # dirichlet_alpha stays None -> no root noise (evaluation discipline)
+            self._last_root = root
             action = sample_action(root, 0.0, rng=self.rng)  # tau=0 -> argmax
             move = self._legalize_action(action, color, root)
         self.board.play(move, color)

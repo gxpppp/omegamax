@@ -133,6 +133,13 @@ class KataGoGTP:
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
+                # The KataGo child is hung (no frame within the timeout):
+                # kill it before propagating so the caller's ``finally``
+                # close() does not wait on (or leak) a zombie process.
+                try:
+                    self.proc.kill()
+                except Exception:  # pragma: no cover - already dead
+                    pass
                 raise TimeoutError(f"GTP timeout on command: {cmd}")
             line = self.proc.stdout.readline()
             if line == "":

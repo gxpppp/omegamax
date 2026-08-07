@@ -123,7 +123,7 @@ class BatchedNetworkEvaluator:
         values_np = value.detach().cpu().numpy().reshape(-1)
         results: list[tuple["Node", np.ndarray, float]] = []
         for node, logit_row, v in zip(leaves, logits_np, values_np):
-            prior = decode_policy(logit_row, node.board)
+            prior = decode_policy(logit_row, node.board, color=node.color)
             results.append((node, prior, float(v)))
 
         self.batch_sizes.append(len(results))

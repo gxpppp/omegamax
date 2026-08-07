@@ -22,6 +22,7 @@ import pytest
 import torch
 
 from omigamax.gtp.gtp import GTPCommandError, GTPEngine, parse_vertex, to_gtp
+from omigamax.network.features import encode
 from omigamax.network.model import create_model
 from omigamax.rules import BLACK, WHITE, Board
 
@@ -334,6 +335,60 @@ def test_set_free_handicap():
     assert response(eng, "clear_board") == "= "
     assert response(eng, "set_free_handicap 2 C3").startswith("? ")
     assert response(eng, "set_free_handicap 2 C3 C3").startswith("? ")
+
+
+# ---------------------------------------------------------------------------
+# F2 MAJOR 1: even-handicap mover -- the search must play as WHITE (the true
+# mover) even though an even count of BLACK handicap stones makes the move-
+# count parity say BLACK. The search root's colour, the colour plane 16 fed to
+# the network and the returned move must all reflect WHITE.
+# ---------------------------------------------------------------------------
+
+def test_fixed_handicap_2_genmove_searches_as_white():
+    eng = make_engine()
+    assert response(eng, "fixed_handicap 2") == "= C3,G7"
+    assert eng.board.state.count(BLACK) == 2
+    assert eng._color_to_move() == WHITE  # white moves first after handicap
+    # the search root for a white genmove must be WHITE, not parity BLACK
+    move = eng._genmove(WHITE)
+    root = eng._last_root
+    assert root is not None, "search root not recorded"
+    assert root.color == WHITE
+    # colour-to-play plane 16 is all 0.0 -> white to move (not all 1.0)
+    planes = encode(root.history, root.color, board_size=eng.size)
+    assert planes[16].max() == 0.0
+    assert planes[16].min() == 0.0
+    # the returned move is a legal WHITE move (a point gets a WHITE stone)
+    if move is not None:
+        assert eng.board.get(*move) == WHITE
+    assert len(eng.board.moves) == 3  # 2 handicap stones + white's move
+
+
+def test_fixed_handicap_4_genmove_searches_as_white():
+    eng = make_engine()
+    assert response(eng, "fixed_handicap 4") == "= C3,G7,G3,C7"
+    assert eng.board.state.count(BLACK) == 4
+    assert eng._color_to_move() == WHITE
+    move = eng._genmove(WHITE)
+    root = eng._last_root
+    assert root is not None and root.color == WHITE
+    planes = encode(root.history, root.color, board_size=eng.size)
+    assert planes[16].max() == 0.0
+    if move is not None:
+        assert eng.board.get(*move) == WHITE
+    assert len(eng.board.moves) == 5  # 4 handicap stones + white's move
+
+
+def test_fixed_handicap_2_genmove_white_via_gtp_line():
+    """End-to-end over the GTP line handler (not just the internal method)."""
+    eng = make_engine()
+    assert response(eng, "fixed_handicap 2") == "= C3,G7"
+    text = response(eng, "genmove W")
+    assert text.startswith("= ")
+    move = parse_vertex(text[2:], 9)
+    if move is not None:
+        assert eng.board.get(*move) == WHITE
+    assert len(eng.board.moves) == 3
 
 
 # ---------------------------------------------------------------------------

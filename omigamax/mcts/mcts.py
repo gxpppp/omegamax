@@ -141,6 +141,9 @@ class Node:
             *root's* children set by :func:`apply_dirichlet_noise` (``None``
             when no noise is active). Selection uses the override at the root
             only; the stored ``child.prior`` values are never mutated.
+        _color: explicitly threaded side to move (handicap positions, see
+            :func:`make_root`); ``None`` falls back to parity / the parent
+            chain via :attr:`color`.
     """
 
     def __init__(
@@ -149,6 +152,7 @@ class Node:
         prior: float = 0.0,
         legal_moves: tuple[int, ...] | None = None,
         parent: "Node | None" = None,
+        color: "int | None" = None,
     ) -> None:
         self.board = board
         self.prior = float(prior)
@@ -157,6 +161,7 @@ class Node:
         self.children: dict[int, "Node"] = {}
         self.legal_moves = legal_moves
         self.parent = parent
+        self._color = color
         # --- todo-10/11 seams: virtual loss + root Dirichlet-noise override ---
         self.virtual_loss = 0
         self.noisy_prior: dict[int, float] | None = None
@@ -175,7 +180,22 @@ class Node:
 
     @property
     def color(self) -> int:
-        """Side to move at this node (black opens, so even move count -> black)."""
+        """Side to move at this node.
+
+        An explicitly threaded ``color`` (handicap positions, see
+        :func:`make_root`) wins; otherwise the mover flips every ply up the
+        parent chain (each child is the position after its parent's move, so
+        the opponent is to play). A parentless node without a threaded colour
+        falls back to move-count parity -- black opens, so an even move count
+        means black to play. The parent-chain path is bit-identical to parity
+        for every ordinary game (where black made move 0), and the only
+        difference in a handicap position is exactly the correction we want:
+        the true mover is threaded at the root and propagates down.
+        """
+        if self._color is not None:
+            return self._color
+        if self.parent is not None:
+            return 3 - self.parent.color
         return BLACK if len(self.board.moves) % 2 == 0 else WHITE
 
     @property
@@ -204,15 +224,20 @@ class Node:
 # tree construction helpers
 # ---------------------------------------------------------------------------
 
-def legal_actions(board: Board) -> tuple[int, ...]:
+def legal_actions(board: Board, color: "int | None" = None) -> tuple[int, ...]:
     """Ascending tuple of legal action indices for the player to move.
+
+    ``color`` optionally forces the side to move (the true mover in handicap
+    positions); ``None`` derives it from move-count parity -- black opens, so
+    an even move count means black to play.
 
     Points come first in ``(row, col)`` order (index ``row*size + col``), then
     the pass index ``size**2`` (always legal). Ties in UCB selection break to
     the lowest index, so ascending order keeps selection deterministic.
     """
     size = board.size
-    color = BLACK if len(board.moves) % 2 == 0 else WHITE
+    if color is None:
+        color = BLACK if len(board.moves) % 2 == 0 else WHITE
     actions = [
         point_to_index(r, c, size)
         for r in range(size)
@@ -239,14 +264,20 @@ def _copy_board(board: Board) -> Board:
     return new_board
 
 
-def make_root(board: Board) -> Node:
+def make_root(board: Board, color: "int | None" = None) -> Node:
     """Build a root node for ``board`` (a copy is taken).
+
+    ``color`` optionally forces the side to move -- the *true* mover in
+    handicap positions, where move-count parity disagrees (handicap stones are
+    BLACK moves but WHITE is to play, so with an even handicap the parity
+    answer ``BLACK`` is wrong). ``None`` (the default) keeps the parity
+    behaviour, correct for every ordinary non-handicap caller.
 
     The root's legal moves are computed eagerly so :func:`expand` can create
     the full child set on the first visit.
     """
     board = _copy_board(board)
-    return Node(board=board, legal_moves=legal_actions(board))
+    return Node(board=board, color=color, legal_moves=legal_actions(board, color))
 
 
 def descend(root: Node, action: int) -> Node:
@@ -304,7 +335,7 @@ def expand(node: Node, prior_probs: np.ndarray) -> None:
     that action, the corresponding AGZ history, and the edge prior.
     """
     if node.legal_moves is None:
-        node.legal_moves = legal_actions(node.board)
+        node.legal_moves = legal_actions(node.board, node.color)
     size = node.board.size
     color = node.color
     for action in node.legal_moves:
@@ -325,17 +356,25 @@ def expand(node: Node, prior_probs: np.ndarray) -> None:
 # terminal value
 # ---------------------------------------------------------------------------
 
-def terminal_value(board: Board, komi: float = DEFAULT_KOMI) -> float:
+def terminal_value(
+    board: Board,
+    komi: float = DEFAULT_KOMI,
+    color: "int | None" = None,
+) -> float:
     """Game outcome from the perspective of the player to move at ``board``.
 
     The position must be terminal (two consecutive passes). Returns +1 if the
     side to move won, -1 if it lost, 0 on jigo (impossible with komi 7.5).
+    ``color`` optionally forces the side to move (handicap positions, where
+    move-count parity disagrees); ``None`` derives it from parity.
     """
     winner = board.winner(komi)
     if winner is None:
         return 0.0
-    current_is_black = BLACK if len(board.moves) % 2 == 0 else WHITE
-    if (winner == "B") == (current_is_black == BLACK):
+    if color is None:
+        color = BLACK if len(board.moves) % 2 == 0 else WHITE
+    current_is_black = color == BLACK
+    if (winner == "B") == current_is_black:
         return 1.0
     return -1.0
 
@@ -364,7 +403,7 @@ class NetworkEvaluator:
         x = torch.from_numpy(features).unsqueeze(0).to(device)
         with torch.no_grad():
             logits, value = self.network(x)
-        prior = decode_policy(logits, node.board)
+        prior = decode_policy(logits, node.board, color=node.color)
         return prior, float(value.reshape(-1)[0].item())
 
 
@@ -518,9 +557,9 @@ def run_search(
 
         # -- terminal leaves never go through the evaluator --
         if node.legal_moves is None:
-            node.legal_moves = legal_actions(node.board)
+            node.legal_moves = legal_actions(node.board, node.color)
         if node.board.is_terminal():
-            value = terminal_value(node.board, komi)
+            value = terminal_value(node.board, komi, color=node.color)
             for visited in reversed(path):
                 visited.visit_count += 1
                 visited.value_sum += value
@@ -822,9 +861,13 @@ class MCTS:
         )
         self.root: Node | None = None
 
-    def new_root(self, board: Board) -> Node:
-        """Reset the search tree to a fresh root over ``board``."""
-        self.root = make_root(board)
+    def new_root(self, board: Board, color: "int | None" = None) -> Node:
+        """Reset the search tree to a fresh root over ``board``.
+
+        ``color`` optionally forces the side to move (the true mover in
+        handicap positions); ``None`` keeps the parity default.
+        """
+        self.root = make_root(board, color=color)
         return self.root
 
     def run(self, simulations: int) -> Node:

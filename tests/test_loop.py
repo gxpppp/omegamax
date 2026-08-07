@@ -192,6 +192,85 @@ class TestLazyViz:
 
 
 # ---------------------------------------------------------------------------
+# F2 MAJOR 2: the live window must actually receive frames during training
+# ---------------------------------------------------------------------------
+
+class TestVizFeed:
+    def test_frames_pushed_during_training(self, tmp_path, monkeypatch):
+        """With viz mounted, every training step enqueues a Snapshot frame."""
+        from omigamax.viz.board_window import SnapshotQueue
+
+        monkeypatch.setattr(loop, "generate_games", fake_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+        queue = SnapshotQueue(maxlen=32)
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": queue, "thread": None, "stop": lambda: None,
+            },
+        )
+        loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=5,
+            batch_size=8, use_symmetry=False, seed=0,
+        )
+        # frames were pushed during training (queue non-empty after the run)
+        assert len(queue) == 5  # one frame per train step
+        snap = queue.poll()
+        assert snap is not None and snap.train_step >= 1
+        assert snap.loss is not None and snap.games >= 1
+
+    def test_push_failure_never_crashes_training(self, tmp_path, monkeypatch):
+        """A broken queue must not abort the training loop."""
+        monkeypatch.setattr(loop, "generate_games", fake_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+
+        class BrokenQueue:
+            def push(self, snap):  # pragma: no cover - exercised, never caught
+                raise RuntimeError("viz queue exploded")
+            def __len__(self):
+                return 0
+
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": BrokenQueue(), "thread": None, "stop": lambda: None,
+            },
+        )
+        report = loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=4,
+            batch_size=8, use_symmetry=False, seed=1,
+        )
+        assert report["loop"]["interrupted"] is False
+        assert report["loop"]["steps_trained"] == 4
+        assert report["checkpoint"]["latest_exists"] is True
+
+    def test_viz_disabled_pushes_nothing(self, tmp_path, monkeypatch):
+        """With viz off there is no queue to push to and training still runs."""
+        monkeypatch.setattr(loop, "generate_games", fake_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+        report = loop.run_loop(
+            make_cfg(viz_enabled=False), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=3,
+            batch_size=8, use_symmetry=False, seed=2,
+        )
+        assert report["protocol"]["viz"]["started"] is False
+        assert report["loop"]["steps_trained"] == 3
+
+
+# ---------------------------------------------------------------------------
 # cycle wiring (mocked components)
 # ---------------------------------------------------------------------------
 

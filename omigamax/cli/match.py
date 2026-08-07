@@ -408,11 +408,6 @@ def play_match_game(engine_b, engine_w, *, size, komi, max_moves, seed,
     max_moves = int(max_moves)
     board = Board(size)
     engine1_color = BLACK if engine1_is_black else WHITE
-    # fresh board on both engines (GTP engines reset on clear_board)
-    for eng in (engine_b, engine_w):
-        eng.command(f"boardsize {size}")
-        eng.command(f"komi {komi:g}")
-        eng.command("clear_board")
 
     def fail(message, **extra) -> dict:
         return {
@@ -429,6 +424,17 @@ def play_match_game(engine_b, engine_w, *, size, komi, max_moves, seed,
             **extra,
         }
 
+    # A command() that raises (subprocess timeout, dead pipe, ...) must abort
+    # only THIS game as a fail() record -- never the whole match.
+    try:
+        # fresh board on both engines (GTP engines reset on clear_board)
+        for eng in (engine_b, engine_w):
+            eng.command(f"boardsize {size}")
+            eng.command(f"komi {komi:g}")
+            eng.command("clear_board")
+    except Exception as exc:  # noqa: BLE001 - per-game failure, not a crash
+        return fail(f"setup command failed: {exc}")
+
     move_list: "list[tuple]" = []
     moves = 0
     while not board.is_terminal() and moves < max_moves:
@@ -436,7 +442,10 @@ def play_match_game(engine_b, engine_w, *, size, komi, max_moves, seed,
         engine = engine_b if color == BLACK else engine_w
         opp = engine_w if color == BLACK else engine_b
         tok = _COLOR_TOK[color]
-        ok, resp = engine.command(f"genmove {tok}")
+        try:
+            ok, resp = engine.command(f"genmove {tok}")
+        except Exception as exc:  # noqa: BLE001 - per-game failure, not a crash
+            return fail(f"{engine.name} command failed: {exc}")
         if not ok:
             return fail(f"genmove rejected by {engine.name}: {resp!r}")
         move_gtp = resp.strip()
@@ -450,7 +459,10 @@ def play_match_game(engine_b, engine_w, *, size, komi, max_moves, seed,
                         f"for {'black' if color == BLACK else 'white'}")
         board.play(move, color)
         move_list.append((move, color))
-        ok2, resp2 = opp.command(f"play {tok} {move_gtp}")
+        try:
+            ok2, resp2 = opp.command(f"play {tok} {move_gtp}")
+        except Exception as exc:  # noqa: BLE001 - per-game failure, not a crash
+            return fail(f"{opp.name} command failed: {exc}")
         if not ok2:
             return fail(f"{opp.name} rejected play {move_gtp!r}: {resp2!r}")
         moves += 1

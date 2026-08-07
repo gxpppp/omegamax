@@ -217,6 +217,48 @@ def test_illegal_engine_move_is_recorded_not_crash():
     assert "illegal move" in report["games_detail"][0]["error"]
 
 
+class ExplodingEngine(AlwaysPassEngine):
+    """A ``command()`` engine that raises ``fail_times`` times on one command."""
+
+    name = "exploder"
+
+    def __init__(self, *, fail_on: str = "genmove", fail_times: int = 1) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+        self.failures_left = int(fail_times)
+
+    def command(self, cmd: str):
+        self.commands.append(cmd)
+        name = cmd.split()[0]
+        if name == self.fail_on and self.failures_left > 0:
+            self.failures_left -= 1
+            raise RuntimeError(f"{self.name} exploded on {cmd!r}")
+        if name == "genmove":
+            return True, "pass"
+        return True, ""
+
+
+def test_engine_command_exception_becomes_per_game_error_not_abort():
+    """F2 advisory: a raising ``command()`` yields a fail() record for THAT
+    game; the match keeps playing the remaining games."""
+    # game 0: engine1 (black) explodes on its first genmove -> per-game error;
+    # game 1: engine1 (white) no longer explodes -> completes normally.
+    e1 = ExplodingEngine(fail_on="genmove", fail_times=1)
+    e2 = AlwaysPassEngine()
+    report = run_match(e1, e2, games=2, size=9, komi=7.5, max_moves=10,
+                       seed=0, sgf_dir=None)
+    assert report["errors"] == 1
+    assert report["completed"] == 1
+    assert "command failed" in report["games_detail"][0]["error"]
+
+    # a setup-phase exception (boardsize) is also a per-game fail() record
+    rec = play_match_game(ExplodingEngine(fail_on="boardsize"),
+                          AlwaysPassEngine(), size=9, komi=7.5, max_moves=10,
+                          seed=3, engine1_name="omigamax",
+                          engine1_is_black=True)
+    assert rec["error"] and "setup command failed" in rec["error"]
+
+
 # ---------------------------------------------------------------------------
 # real vs-random integration (tiny net, cpu)
 # ---------------------------------------------------------------------------

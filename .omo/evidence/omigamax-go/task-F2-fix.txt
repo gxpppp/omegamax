@@ -1,0 +1,56 @@
+﻿omigamax-go F2 code-quality review fix -- evidence
+HEAD (pre-fix): 5f91c5f (docs: README config docs)
+date: 2026-08-08T04:05:38
+
+=== MAJOR 1: GTP even-handicap mover (gtp/gtp.py + mcts/mcts.py + mcts/batched_evaluator.py) ===
+  - Node.__init__/Node.color: optional threaded color; parent-chain fallback (parity default)
+  - legal_actions(board, color=None), make_root(board, color=None), MCTS.new_root(board, color=None)
+  - terminal_value(board, komi, color=None); expand/run_search pass node.color
+  - NetworkEvaluator/BatchedNetworkEvaluator decode_policy(logits, board, color=node.color)
+  - gtp._genmove: make_root(self.board, color=color) + records eng._last_root (testable probe)
+  - tests: test_gtp.py (3 live handicap tests), test_mcts.py (4 mcts handicap tests)
+
+=== MAJOR 2: viz fed from train loop (train/loop.py) ===
+  - loop.py: _reconstruct_board_state / viz_board_info / build_viz_snapshot / push_viz_frame helpers
+  - run_loop: one viz frame per train step (board cached per cycle, metrics per step)
+  - start_viz_if_available now receives cfg viz_queue_size (default 32)
+  - tests: test_loop.py TestVizFeed (frames pushed / push failure safe / disabled)
+
+=== advisory fixes ===
+  1. train/train.py load_checkpoint: weights_only=True only, fallback removed
+  2. cli/match.py play_match_game: command() wrapped -> per-game fail() record (test added)
+  3. cli/rule_consistency.py KataGoGTP.command: kill subprocess before raising TimeoutError
+
+=== pytest ===
+........................................................................ [ 16%]
+........................................................................ [ 33%]
+........................................................................ [ 50%]
+........................................................................ [ 67%]
+........................................................................ [ 84%]
+.................................................................        [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\pygame\pkgdata.py:25
+  E:\AAAhuancun\betamaster\.venv\Lib\site-packages\pygame\pkgdata.py:25: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import resource_stream, resource_exists
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+425 passed, 1 warning in 62.84s (0:01:02)
+
+=== LIVE CHECK 1: gtp fixed_handicap 2 genmove (real engine, tiny 9x9 net) ===
+fixed_handicap 2 -> = C3,G7
+_color_to_move() after handicap: WHITE
+genmove W -> = B3
+search root color: WHITE
+plane-16 max (0.0 = white to move): 0.0
+returned stone colour on board: 2 (2 = WHITE)
+board moves: 3 (2 handicap + 1 white)
+LIVE CHECK 1: PASS
+
+=== LIVE CHECK 2: loop smoke with viz frames (SDL_VIDEODRIVER=dummy) ===
+pygame 2.6.1 (SDL 2.28.4, Python 3.12.10)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+viz reason: available
+viz started: True
+steps trained: 5
+Snapshot frames pushed during training: 5
+LIVE CHECK 2: PASS

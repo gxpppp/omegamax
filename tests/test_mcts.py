@@ -292,6 +292,84 @@ def test_illegal_actions_never_become_children():
 
 
 # ---------------------------------------------------------------------------
+# F2 MAJOR 1: threading the true side-to-move (even-handicap mover bug)
+# ---------------------------------------------------------------------------
+
+def test_make_root_color_default_is_parity_backward_compatible():
+    """No ``color`` argument -> parity, bit-identical to before the fix."""
+    board = Board(5)
+    board.play((2, 2), BLACK)  # one move -> white to play (parity)
+    root = make_root(board)
+    assert root._color is None
+    assert root.color == WHITE
+    assert root.legal_moves == legal_actions(board)  # parity default
+    # two moves -> black to play
+    board.play((1, 1), WHITE)
+    assert make_root(board).color == BLACK
+
+
+def test_make_root_even_handicap_color_white():
+    """fixed_handicap 2: two BLACK stones, but WHITE is the true mover."""
+    board = Board(9)
+    board.play((6, 2), BLACK)  # handicap stone 1
+    board.play((2, 6), BLACK)  # handicap stone 2
+    assert len(board.moves) == 2  # even -> parity would (wrongly) say BLACK
+    root = make_root(board, color=WHITE)
+    assert root._color == WHITE
+    assert root.color == WHITE
+    # the root's legal mask is built for WHITE
+    assert root.legal_moves == legal_actions(board, color=WHITE)
+    # colour-to-play plane 16: all 0.0 (white to move), not all 1.0 (black)
+    planes = encode(root.history, root.color, board_size=9)
+    assert planes[16].max() == 0.0
+    assert planes[16].min() == 0.0
+
+
+def test_expand_after_even_handicap_plays_white_moves():
+    """Children of a WHITE root must advance the board with WHITE stones."""
+    board = Board(9)
+    board.play((6, 2), BLACK)  # handicap stone 1
+    board.play((2, 6), BLACK)  # handicap stone 2
+    root = make_root(board, color=WHITE)
+    prior = np.full(9 * 9 + 1, 1.0 / (9 * 9 + 1), dtype=np.float32)
+    expand(root, prior)
+    n_points = 9 * 9
+    assert len(root.children) == len(root.legal_moves) == 80  # 79 empty + pass
+    for action, child in root.children.items():
+        assert child.color == BLACK, \
+            "the mover flips to BLACK after the white root plays"
+        if action == n_points:  # pass -> no stone added
+            continue
+        r, c = divmod(action, 9)
+        assert child.board.get(r, c) == WHITE, \
+            f"child of action {action} has a {child.board.get(r, c)} stone -- " \
+            "the search expanded the root as BLACK instead of WHITE"
+    # the plain parity root (pre-fix behaviour) would have played BLACK stones
+    parity_root = make_root(board)
+    assert parity_root.color == BLACK
+
+
+def test_terminal_value_after_even_handicap_uses_threaded_color():
+    """terminal_value perspective must follow the threaded mover, not parity."""
+    board = Board(9)
+    board.play((6, 2), BLACK)
+    board.play((2, 6), BLACK)
+    # white passes, black passes -> terminal; 4 moves (even) so parity (wrongly)
+    # says BLACK is to move, but the true mover threaded in is WHITE.
+    board.pass_move(WHITE)
+    board.pass_move(BLACK)
+    assert board.is_terminal()
+    assert len(board.moves) == 4
+    winner = board.winner(7.5)
+    expected_white = 1.0 if winner == "W" else -1.0
+    # the threaded mover's perspective matches the actual outcome
+    assert terminal_value(board, komi=7.5, color=WHITE) == pytest.approx(expected_white)
+    # parity (default) calls the mover BLACK here (even move count), so it
+    # reports the opposite perspective -- exactly the bug the fix corrects
+    assert terminal_value(board, komi=7.5) == pytest.approx(-expected_white)
+
+
+# ---------------------------------------------------------------------------
 # pass handling
 # ---------------------------------------------------------------------------
 

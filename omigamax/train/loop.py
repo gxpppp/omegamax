@@ -35,7 +35,12 @@ Per the plan (todo 16, authoritative) and AGZ (Nature 550, 2017, Methods fig. 1)
   and returns a handle (``queue`` / ``thread`` / ``stop``). Any failure
   (module absent, pygame init error, ...) degrades to pure-log mode with a
   warning -- it never crashes a training run; ``--viz off`` force-disables
-  the mount. The thread is stopped cleanly at the end of the run.
+  the mount. The thread is stopped cleanly at the end of the run. The loop
+  *feeds* the window (F2 MAJOR 2): one Snapshot frame per training step --
+  a board reconstructed once per cycle from the newest self-play position
+  plus the live ``loss`` / ``train_step`` / ``games`` / ``elo`` metrics --
+  pushed non-blockingly through :func:`push_viz_frame` (drop-oldest,
+  try/except-wrapped, so the visualization can never slow or crash training).
 
 Single-process self-play only (plan Must-NOT: no multiprocessing yet).
 
@@ -61,7 +66,8 @@ import torch
 
 from omigamax.config import load_config
 from omigamax.network.model import create_model
-from omigamax.train.buffer import ReplayBuffer
+from omigamax.rules import BLACK, WHITE
+from omigamax.train.buffer import ReplayBuffer, list_game_files
 from omigamax.train.evaluate import (
     DEFAULT_EVAL_GAMES,
     DEFAULT_EVAL_SIMS,
@@ -176,6 +182,106 @@ def start_viz_if_available(cfg: dict, logger=None) -> dict:
     logger.info("viz thread started -- visualization mount point active")
     return {"started": True, "reason": "available",
             "queue": queue, "thread": thread, "stop": thread.stop}
+
+
+# ---------------------------------------------------------------------------
+# viz frame feeding (F2 MAJOR 2: the live window must actually show frames)
+# ---------------------------------------------------------------------------
+
+def _reconstruct_board_state(planes, board_size: int) -> list:
+    """Decode an AGZ position's 17 planes into a 0/1/2 colour-code board.
+
+    Plane 0 holds the current player's stones, plane 1 the opponent's, and
+    plane 16 tells which colour is to play (the same layout
+    :func:`omigamax.network.features.encode` produces). Returns the 2-D
+    ``(board_size, board_size)`` list the viz ``Snapshot`` expects. Pure
+    numpy; never raises.
+    """
+    n = int(board_size)
+    current_is_black = bool(planes[16, 0, 0] > 0.5)
+    cur, opp = (BLACK, WHITE) if current_is_black else (WHITE, BLACK)
+    state = np.zeros((n, n), dtype=int)
+    state[planes[0] > 0.5] = cur
+    state[planes[1] > 0.5] = opp
+    return state.tolist()
+
+
+def viz_board_info(buffer, board_size: int) -> "dict | None":
+    """Best-effort board frame from the newest self-play game.
+
+    Reads the replay buffer's most recent npz game and reconstructs its last
+    recorded position, so the live window shows a real self-play board behind
+    the updating metrics panel. Returns ``None`` when no position is
+    available or the reconstruction fails -- the loop keeps training either
+    way. Call once per cycle: per-step frames reuse this board and only
+    refresh the metrics (``train_step`` / ``loss`` / ``games`` / ``elo``).
+    """
+    try:
+        files = list_game_files(buffer.data_dir, keep=1)
+        if not files:
+            return None
+        with np.load(files[-1]) as data:
+            s = np.asarray(data["s"], dtype=np.float32)
+            move_count = int(np.asarray(data["move_count"], dtype=np.int64))
+        if s.shape[0] == 0:
+            return None
+        planes = s[-1]
+        n = int(planes.shape[-1])
+        return {
+            "board": _reconstruct_board_state(planes, n),
+            "board_size": n,
+            "move_number": int(move_count),
+            "current_player": int(BLACK if planes[16, 0, 0] > 0.5 else WHITE),
+        }
+    except Exception:  # noqa: BLE001 - viz must never break the loop
+        return None
+
+
+def build_viz_snapshot(board_info, *, komi, games, train_step, loss, elo,
+                       win_rate=None, last_move=None):
+    """A viz ``Snapshot`` over ``board_info`` + the latest training metrics.
+
+    Lazy-imports the viz module so a missing pygame can never raise here.
+    Returns ``None`` (no frame) when no board is available or the module is
+    absent -- the loop keeps training either way.
+    """
+    if board_info is None:
+        return None
+    try:
+        from omigamax.viz.board_window import Snapshot
+    except Exception:  # noqa: BLE001 - viz must never break the loop
+        return None
+    return Snapshot(
+        board=board_info["board"],
+        board_size=int(board_info["board_size"]),
+        move_number=int(board_info["move_number"]),
+        current_player=int(board_info["current_player"]),
+        win_rate=win_rate,
+        last_move=last_move,
+        komi=float(komi),
+        games=int(games) if games is not None else None,
+        train_step=int(train_step) if train_step is not None else None,
+        loss=float(loss) if loss is not None else None,
+        elo=float(elo) if elo is not None else None,
+    )
+
+
+def push_viz_frame(viz, snap) -> bool:
+    """Push one ``Snapshot`` to the viz queue; never blocks, never raises.
+
+    Safe from the trainer thread: ``SnapshotQueue.push`` is non-blocking and
+    drop-oldest, and ANY failure here (queue gone, window closed, malformed
+    frame) is swallowed so visualization can never slow or crash training.
+    Returns True when a frame was enqueued.
+    """
+    queue = viz.get("queue") if isinstance(viz, dict) else None
+    if queue is None or snap is None:
+        return False
+    try:
+        queue.push(snap)
+        return True
+    except Exception:  # noqa: BLE001 - viz must never break training
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +513,11 @@ def run_loop(
     buffer = ReplayBuffer(data_dir, max_games=keep_games, board_size=board_size)
 
     current_elo = read_last_elo(history)
-    viz = start_viz_if_available({"viz_enabled": viz_enabled}, logger)
+    viz = start_viz_if_available(
+        {"viz_enabled": viz_enabled,
+         "viz_queue_size": int(cfg.get("viz_queue_size", 32))},
+        logger,
+    )
     logger.info(
         "loop start: resume=%s global_step=%d games_generated=%d "
         "steps_into_cycle=%d viz=%s",
@@ -520,6 +630,12 @@ def run_loop(
             if n_train <= 0:
                 break
 
+            # One board frame per cycle (rebuilt from the newest self-play
+            # position); every train step below reuses it and only refreshes
+            # the metrics -- no per-step disk I/O in the viz path.
+            viz_board = viz_board_info(buffer, board_size)
+            viz_komi = float(cfg.get("komi", 7.5))
+
             for _ in range(n_train):
                 losses, lrs, global_step, rng = train_steps(
                     model, optimizer, buffer, steps=1, rng=rng, seed=int(seed),
@@ -537,6 +653,14 @@ def run_loop(
                 _log_train_step(train_log, step=global_step, loss=loss, lr=lr,
                                 games=buffer.num_games, elo=current_elo,
                                 cycle=cycle_no)
+                # F2 MAJOR 2: feed the live window a frame per train step
+                # (non-blocking, drop-oldest, wrapped -- viz can never slow or
+                # crash training).
+                if viz.get("started"):
+                    push_viz_frame(viz, build_viz_snapshot(
+                        viz_board, komi=viz_komi, games=buffer.num_games,
+                        train_step=global_step, loss=loss, elo=current_elo,
+                    ))
                 if interrupt_after is not None and total_steps >= int(interrupt_after):
                     raise KeyboardInterrupt(
                         f"simulated Ctrl+C after {total_steps} training steps "
