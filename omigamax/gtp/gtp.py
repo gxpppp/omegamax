@@ -8,7 +8,8 @@ bots::
     protocol_version / name / version / known_command / list_commands
     boardsize / clear_board / komi / play / genmove
     fixed_handicap / place_free_handicap / set_free_handicap
-    loadsgf / kgs-time_settings / time_left / final_score / printsgf / quit
+    loadsgf / kgs-time_settings / time_left / final_score / printsgf
+    undo / kgs-chat (silent) / quit
 
 Response format (GTP v2): a response frame is ``=id <text>`` on success or
 ``?id <text>`` on error (``id`` echoed only when the client supplied one;
@@ -28,7 +29,17 @@ play is deterministic (per-move; a seeded RNG resolves ties). ``kgs-time_setting
 is parsed and mapped to a search budget by a simplified stub (plan: 简化预算
 映射 stub); the full byo-yomi clock is a deferred extension. ``time_left`` is
 accepted and stored but does not change the budget (stub). ``kgs-chat`` is
-handled by responding empty (plan Must-NOT: no chat semantics).
+handled by responding empty (plan Must-NOT: no chat semantics) and appended to
+:attr:`GTPEngine.chat_log` so a future platform layer can inspect it.
+``undo [n]`` replays the game to before the last ``n`` moves (handicap-aware:
+re-undoing past the handicap stones clears it).
+
+Robustness layer (todo 19): every command handler is wrapped by
+:meth:`GTPEngine.handle_line`, which never raises -- malformed input (garbage,
+wrong arity, bad coords, absurd ids, binary junk, over-long lines) produces a
+well-formed ``?`` frame and the engine stays alive for the next line. The
+echoed command id and response lines are capped so pathological input cannot
+produce unbounded frames.
 
 Handicap (``fixed_handicap`` etc.): the standard star-point placement, black
 stones; after handicap it is *white* to move (the engine tracks the handicap
@@ -86,6 +97,19 @@ MAX_SIMS = 800
 # convention: 2 stones = bottom-left + top-right stars, then top-left,
 # bottom-right, centre, edge middles).
 _HANDICAP_STARS = {19: (3, 9, 15), 13: (3, 6, 9), 9: (2, 4, 6)}
+
+
+# Max length of the echoed command id and of each response line. Pathological
+# input (a 10k-digit id or a 10k-char token) must still yield a bounded frame.
+_MAX_ID_LEN = 64
+_MAX_LINE_LEN = 2000
+
+
+def _clip(text: str, limit: int = _MAX_LINE_LEN) -> str:
+    """Truncate ``text`` to ``limit`` chars with an ellipsis marker."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 class GTPCommandError(Exception):
@@ -178,6 +202,7 @@ class GTPEngine:
         "time_left",
         "final_score",
         "printsgf",
+        "undo",
     ]
     # command -> bound handler method name ("kgs-chat" handled but not listed).
     _HANDLERS = {
@@ -200,6 +225,7 @@ class GTPEngine:
         "time_left": "_cmd_time_left",
         "final_score": "_cmd_final_score",
         "printsgf": "_cmd_printsgf",
+        "undo": "_cmd_undo",
         "kgs-chat": "_cmd_kgs_chat",
     }
 
@@ -238,6 +264,7 @@ class GTPEngine:
         self._handicap = 0
         self._time_settings: "dict | None" = None
         self._time_left: dict = {}
+        self.chat_log: "list[tuple[str, str]]" = []
         self.should_quit = False
 
         if network is not None:
@@ -380,7 +407,9 @@ class GTPEngine:
     def _format_response(self, ok: bool, cmd_id, text: str) -> list:
         status = "=" if ok else "?"
         head = f"{status}{cmd_id} {text}" if cmd_id is not None else f"{status} {text}"
-        lines = head.split("\n")
+        if cmd_id is not None and len(cmd_id) > _MAX_ID_LEN:
+            head = f"{status}{cmd_id[:_MAX_ID_LEN]} {text}"
+        lines = [_clip(ln) for ln in head.split("\n")]
         lines.append("")  # blank-line frame terminator (GTP v2)
         return lines
 
@@ -454,9 +483,12 @@ class GTPEngine:
         if len(args) != 1:
             raise GTPCommandError("komi requires one argument")
         try:
-            self.komi = float(args[0])
+            komi = float(args[0])
         except ValueError:
             raise GTPCommandError(f"invalid komi: {args[0]!r}")
+        if not math.isfinite(komi):
+            raise GTPCommandError(f"invalid komi: {args[0]!r}")
+        self.komi = komi
         return True, ""
 
     def _cmd_play(self, args):
@@ -488,7 +520,11 @@ class GTPEngine:
     def _cmd_fixed_handicap(self, args):
         if len(args) != 1:
             raise GTPCommandError("fixed_handicap requires one argument")
-        points = self._place_handicap(int(args[0]))
+        try:
+            n = int(args[0])
+        except ValueError:
+            raise GTPCommandError(f"invalid handicap: {args[0]!r}")
+        points = self._place_handicap(n)
         return True, ",".join(to_gtp(p, self.size) for p in points)
 
     def _cmd_place_free_handicap(self, args):
@@ -496,7 +532,11 @@ class GTPEngine:
         # reports where black placed them -- the GTP contract.
         if len(args) != 1:
             raise GTPCommandError("place_free_handicap requires one argument")
-        points = self._place_handicap(int(args[0]))
+        try:
+            n = int(args[0])
+        except ValueError:
+            raise GTPCommandError(f"invalid handicap: {args[0]!r}")
+        points = self._place_handicap(n)
         return True, ",".join(to_gtp(p, self.size) for p in points)
 
     def _cmd_set_free_handicap(self, args):
@@ -529,7 +569,10 @@ class GTPEngine:
         path = Path(args[0])
         if not path.exists():
             raise GTPCommandError(f"file not found: {path}")
-        parsed = parse_sgf(path.read_text(encoding="utf-8"))
+        try:
+            parsed = parse_sgf(path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
+            raise GTPCommandError(f"invalid SGF file: {exc}")
         if not (MIN_SIZE <= parsed["size"] <= MAX_SIZE):
             raise GTPCommandError(f"unacceptable board size in SGF: {parsed['size']}")
         self.size = parsed["size"]
@@ -616,9 +659,44 @@ class GTPEngine:
         path.write_text(sgf, encoding="utf-8")
         return True, str(path)
 
+    def _undo_moves(self, n: int) -> None:
+        """Replay the game without its last ``n`` moves (handicap-aware).
+
+        Handicap stones are recorded as ordinary BLACK moves, so re-undoing
+        past them removes the handicap along with the stones.
+        """
+        kept = self.board.moves[:-n]
+        board = Board(self.size)
+        for move, color in kept:
+            board.play(move, color)
+        self.board = board
+        self._handicap = min(self._handicap, len(kept))
+
+    def _cmd_undo(self, args):
+        # Standard GTP undo (GNU Go convention): replay the position from
+        # before the last move; ``undo <n>`` removes n moves at once.
+        if len(args) > 1:
+            raise GTPCommandError("undo accepts at most one argument")
+        n = 1
+        if args:
+            try:
+                n = int(args[0])
+            except ValueError:
+                raise GTPCommandError(f"invalid undo count: {args[0]!r}")
+        if n <= 0:
+            raise GTPCommandError("invalid undo count: must be positive")
+        if n > len(self.board.moves):
+            raise GTPCommandError("cannot undo: not enough moves")
+        self._undo_moves(n)
+        return True, ""
+
     def _cmd_kgs_chat(self, args):
         # kgs-chat semantics deliberately not implemented (plan Must-NOT):
-        # respond with the empty string.
+        # respond with the empty string and record the message so a future
+        # platform layer can inspect it. args = [channel, message...]; a bare
+        # call is tolerated without error.
+        channel = args[0] if args else ""
+        self.chat_log.append((channel, " ".join(args[1:])))
         return True, ""
 
 
