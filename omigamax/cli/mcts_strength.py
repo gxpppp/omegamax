@@ -333,6 +333,23 @@ def _smoke_train(network, cfg, steps: int, device, seed: int,
     return network
 
 
+def _load_weights(network: torch.nn.Module, path: "str | Path", device) -> str:
+    """Load network weights from ``path`` into ``network``; return a label.
+
+    Accepts both a raw state dict (the smoke-trained weights this harness
+    itself emits) and a full training checkpoint (``models/best.pt``, which
+    wraps the state dict under ``model_state_dict`` together with
+    global_step/arch/config). Regression fix: loading a trained checkpoint
+    previously raised ``Missing key(s) in state_dict`` because the whole
+    checkpoint dict was fed to ``load_state_dict``.
+    """
+    ckpt = torch.load(Path(path), map_location=device, weights_only=True)
+    sd = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) \
+        else ckpt
+    network.load_state_dict(sd)
+    return f"loaded from {path}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="omigamax todo-12 MCTS strength ladder "
@@ -401,10 +418,7 @@ def main(argv: list[str] | None = None) -> int:
 
     weight_source = f"random init (torch seed {args.seed})"
     if args.weights:
-        network.load_state_dict(
-            torch.load(Path(args.weights), map_location=device, weights_only=True)
-        )
-        weight_source = f"loaded from {args.weights}"
+        weight_source = _load_weights(network, args.weights, device)
     elif args.smoke_train_steps > 0:
         network = _smoke_train(network, cfg, args.smoke_train_steps, device,
                                args.seed, Path("models/todo12-fixed-weights.pt"))

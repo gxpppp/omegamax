@@ -1,0 +1,9 @@
+{
+  "phase": "viz",
+  "rc": 0,
+  "png": "logs\\viz_smoke.png",
+  "evidence_png": ".omo\\evidence\\omigamax-go\\task-21-e2e\\viz.png",
+  "bytes": 24325,
+  "wall_time_s": 0.06,
+  "phase_wall_time_s": 0.23
+}

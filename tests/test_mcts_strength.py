@@ -13,6 +13,7 @@ import torch
 
 from omigamax.cli.mcts_strength import (
     _RandomAgent,
+    _load_weights,
     _mcts_agent,
     _summarize_pairing,
     play_game,
@@ -86,3 +87,40 @@ def test_run_pairing_alternates_colours_and_writes_sgf(tmp_path):
         parsed = parse_sgf(sgf_path.read_text(encoding="utf-8"))
         assert parsed["size"] == SIZE
         assert len(parsed["moves"]) == records[i]["moves"]
+
+
+def test_load_weights_accepts_full_checkpoint_and_raw_state_dict(tmp_path):
+    """Regression (todo 21): --weights must load a trained checkpoint -- the
+    full checkpoint format wraps the state dict under ``model_state_dict`` --
+    and still accept the raw state dicts this harness itself emits."""
+    import torch
+
+    from omigamax.cli import mcts_strength
+    from omigamax.network.model import create_model
+
+    net = create_model(blocks=2, channels=16, board_size=SIZE)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # full training checkpoint (the models/best.pt shape)
+    ckpt_path = tmp_path / "best.pt"
+    torch.save({
+        "model_state_dict": net.state_dict(),
+        "global_step": 1234,
+        "arch": {"blocks": 2, "channels": 16, "board_size": SIZE},
+        "config": {"board_size": SIZE},
+    }, ckpt_path)
+    loaded = create_model(blocks=2, channels=16, board_size=SIZE).to(device)
+    src = _load_weights(loaded, ckpt_path, device)
+    assert "loaded from" in src
+    # weights actually matched the checkpoint
+    ref = net.state_dict()
+    for k, v in loaded.state_dict().items():
+        assert torch.equal(v.cpu(), ref[k].cpu()), k
+
+    # raw state dict (this harness's _smoke_train output) still works
+    raw_path = tmp_path / "raw.pt"
+    torch.save(net.state_dict(), raw_path)
+    loaded2 = create_model(blocks=2, channels=16, board_size=SIZE).to(device)
+    _load_weights(loaded2, raw_path, device)
+    for k, v in loaded2.state_dict().items():
+        assert torch.equal(v.cpu(), ref[k].cpu()), k

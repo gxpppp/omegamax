@@ -1,0 +1,24 @@
+=== TODO 20: match CLI ===
+command: python -m omigamax.cli.match --engine1 omigamax --engine2 random --model models\best.pt --games 20 --sims 40 --board-size 19 --komi 7.5 --seed 21
+game 0: omigamax=B winner=B moves=600 result=B+219.5
+game 1: omigamax=W winner=W moves=600 result=W+171.5
+game 2: omigamax=B winner=B moves=600 result=B+172.5
+game 3: omigamax=W winner=B moves=600 result=B+206.5
+game 4: omigamax=B winner=B moves=600 result=B+197.5
+game 5: omigamax=W winner=B moves=600 result=B+142.5
+game 6: omigamax=B winner=W moves=600 result=W+241.5
+game 7: omigamax=W winner=W moves=600 result=W+207.5
+game 8: omigamax=B winner=W moves=548 result=W+120.5
+game 9: omigamax=W winner=W moves=600 result=W+189.5
+game 10: omigamax=B winner=B moves=600 result=B+219.5
+game 11: omigamax=W winner=W moves=600 result=W+175.5
+game 12: omigamax=B winner=W moves=600 result=W+184.5
+game 13: omigamax=W winner=B moves=600 result=B+211.5
+game 14: omigamax=B winner=W moves=600 result=W+108.5
+game 15: omigamax=W winner=B moves=600 result=B+143.5
+game 16: omigamax=B winner=W moves=239 result=W+9.5
+game 17: omigamax=W winner=B moves=600 result=B+140.5
+game 18: omigamax=B winner=B moves=600 result=B+147.5
+game 19: omigamax=W winner=B moves=600 result=B+94.5
+win rate (omigamax): 9/20 = 0.450 ELO diff -34.86
+wall_time_s: 3587.19

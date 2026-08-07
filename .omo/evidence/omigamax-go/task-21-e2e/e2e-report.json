@@ -1,0 +1,293 @@
+{
+  "todo": 21,
+  "plan_reference": ".omo/plans/omigamax-go.md todo 21",
+  "date": "2026-08-08",
+  "device": "cuda",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU (6GB)",
+    "measured_sims_per_sec": "~88-160 (todo 12/13/21 evidence; plan assumed 300-600)",
+    "selfplay_games_per_hour_at_sims40": "~21 (todo-13 measured 20.9); match phase: 20 vs-random games @ sims 40 in 3587s"
+  },
+  "phases_run": [
+    "train",
+    "match",
+    "ladder-sanity",
+    "viz"
+  ],
+  "wall_time_s_total": 10772.81,
+  "wall_time_min_total": 179.5,
+  "peak_gpu_mem_gb": 1.05,
+  "soft_target_2h": {
+    "target_hours": 2.0,
+    "note": "plan todo 21: 目标 <2 小时, 可调低局数达成; 3060 上该配置估算 1.5-4.5h, 硬上限不可达成 (Momus B10/Oracle #10). Actual wall time is recorded above; the target is SOFT."
+  },
+  "training": {
+    "steps_trained": 3200,
+    "global_step_final": 3200,
+    "games_generated": 16,
+    "cycles_done": 4,
+    "positions_in_buffer": 3782,
+    "loss_first": 7.991870164871216,
+    "loss_last": 1.48984956741333,
+    "loss_decrease": true,
+    "train_step_lines": 3200,
+    "eval_gates": 5,
+    "eval_summaries": [
+      {
+        "step": 800,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -5.333
+      },
+      {
+        "step": 1600,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -10.421
+      },
+      {
+        "step": 2000,
+        "winrate": 0.6667,
+        "candidate_wins": 2,
+        "games": 3,
+        "replaced": true,
+        "elo": -4.608
+      },
+      {
+        "step": 2400,
+        "winrate": 0.6667,
+        "candidate_wins": 2,
+        "games": 3,
+        "replaced": true,
+        "elo": 0.938
+      },
+      {
+        "step": 3200,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -4.439
+      }
+    ],
+    "loss_from": 1.080407,
+    "loss_to": 1.48985,
+    "protocol": {
+      "cycles": 4,
+      "games_per_cycle": 4,
+      "steps_per_cycle": 800,
+      "simulations": 60,
+      "selfplay_max_moves": 250,
+      "batch_size": 128,
+      "eval_games": 3,
+      "eval_sims": 40,
+      "eval_max_moves": 250,
+      "board_size": 19,
+      "seed": 21
+    }
+  },
+  "model": {
+    "path": "models\\best.pt",
+    "arch": {
+      "blocks": 10,
+      "channels": 128,
+      "board_size": 19
+    },
+    "global_step": 2400,
+    "forward": {
+      "policy_shape": [
+        1,
+        362
+      ],
+      "value_shape": [
+        1,
+        1
+      ],
+      "finite": true
+    }
+  },
+  "eval_history_elo_trajectory": [
+    {
+      "step": 800,
+      "winrate": 0.3333,
+      "elo": -5.333,
+      "replaced": false
+    },
+    {
+      "step": 1600,
+      "winrate": 0.3333,
+      "elo": -10.421,
+      "replaced": false
+    },
+    {
+      "step": 2000,
+      "winrate": 0.6667,
+      "elo": -4.608,
+      "replaced": true
+    },
+    {
+      "step": 2400,
+      "winrate": 0.6667,
+      "elo": 0.938,
+      "replaced": true
+    },
+    {
+      "step": 3200,
+      "winrate": 0.3333,
+      "elo": -4.439,
+      "replaced": false
+    }
+  ],
+  "vs_random": {
+    "phase": "match",
+    "rc": 0,
+    "wall_time_s": 3587.43,
+    "engine2": "random",
+    "sims": 40,
+    "games": 20,
+    "completed": 20,
+    "errors": 0,
+    "wins": 9,
+    "winrate": 0.45,
+    "elo_diff": -34.86,
+    "ci95": [
+      0.2582,
+      0.6579
+    ],
+    "milestone": {
+      "winrate": 0.45,
+      "wins": 9,
+      "games": 20,
+      "bar": 0.8,
+      "ci95": [
+        0.2582,
+        0.6579
+      ],
+      "met": false,
+      "note": "plan early milestone: >80% vs random-legal is a WEAK pipeline signal (不达不阻塞); NOT met unless the measured win rate is above the bar."
+    },
+    "evidence": ".omo\\evidence\\omigamax-go\\task-21-e2e\\match-vs-random.json",
+    "phase_wall_time_s": 3587.45
+  },
+  "vs_katago": {
+    "phase": "katago",
+    "skipped": true,
+    "reason": "not re-run in this smoke finalize pass; the vs-KataGo GTP pipeline is already proven by todo-20 evidence (task-20-demo-katago.json: 1 game vs eigen CPU b10c128, harness ran end-to-end, KataGo won as expected). KataGo is a strong baseline; a low omigamax win rate there is expected and is NOT a failure."
+  },
+  "todo12_gate_rerun": {
+    "phase": "ladder-sanity",
+    "rc": 0,
+    "wall_time_s": 339.23,
+    "weight_source": "loaded from models/best.pt",
+    "protocol": {
+      "levels": [
+        40,
+        200,
+        800
+      ],
+      "pairings": [
+        "40v200",
+        "200v800",
+        "40v800"
+      ],
+      "games_per_pairing_full": 1,
+      "quick_mode": true,
+      "quick_reduction": "800-sim pairings -> 30 games",
+      "games_per_pairing_effective": {
+        "40v200": 1,
+        "200v800": 1,
+        "40v800": 1
+      },
+      "random_baseline_games": 0,
+      "random_baseline_levels": [
+        40,
+        200,
+        800
+      ],
+      "max_time_min": 4.0,
+      "pairing_time_min": 6.0,
+      "tau": 1.0,
+      "komi": 7.5,
+      "max_moves": 60,
+      "c_puct": 2.5,
+      "virtual_loss": 3,
+      "master_seed": 21
+    },
+    "pairings": {
+      "40v200": {
+        "games": 1,
+        "hi_wins": 1,
+        "hi_winrate": 1.0,
+        "truncated": false,
+        "planned_games": 1,
+        "ci95": [
+          0.2065,
+          1.0
+        ]
+      },
+      "200v800": {
+        "games": 1,
+        "hi_wins": 1,
+        "hi_winrate": 1.0,
+        "truncated": false,
+        "planned_games": 1,
+        "ci95": [
+          0.2065,
+          1.0
+        ]
+      }
+    },
+    "monotonic": {
+      "P(200>40)": 1.0,
+      "P(800>200)": 1.0,
+      "P(200>40)>0.5": true,
+      "P(800>200)>0.5": true,
+      "ordering_ok": true
+    },
+    "accepted": true,
+    "games_played": 2,
+    "projected_times": {
+      "assumption": "median per-game wall time x target games (measured on this device)",
+      "40v200": {
+        "full_60_hours": 1.0461459600000125,
+        "quick_hours": 0.01743576600000021
+      },
+      "200v800": {
+        "full_60_hours": 4.606396438333347,
+        "quick_hours": 0.07677327397222244
+      },
+      "40v800": {
+        "full_60_hours": null,
+        "quick_hours": null
+      },
+      "full_protocol_total_hours": 5.65254239833336,
+      "quick_protocol_total_hours": 0.09420903997222266
+    },
+    "evidence": ".omo\\evidence\\omigamax-go\\task-21-e2e\\ladder-sanity.json",
+    "gate_note": "plan todo-12 key-gate is 60 局/配对 (--games 60). This smoke re-run used the plan's reduced-sample allowance (--games N --quick) and was time-boxed (4 min) with max_moves=60 shallow games -- 1 game per pairing is far below the key-gate sample size, so the gate is UNCONFIRMED; the monotonic point estimates are directionally OK only.",
+    "status": "UNCONFIRMED (1 game per pairing, max_moves=60 shallow games, time-boxed; pending >=30-60 games/pairing)",
+    "weights": "models/best.pt"
+  },
+  "viz": {
+    "phase": "viz",
+    "rc": 0,
+    "png": "logs\\viz_smoke.png",
+    "evidence_png": ".omo\\evidence\\omigamax-go\\task-21-e2e\\viz.png",
+    "bytes": 24325,
+    "wall_time_s": 0.06,
+    "phase_wall_time_s": 0.23
+  },
+  "assessment": {
+    "met": false,
+    "notes": [
+      "PIPELINE (todo-21 core): the zero-to-playable chain ran end-to-end -- self-play generated 16 real games, 3200 training steps, 5 eval gates, best.pt written. loss_decrease=True.",
+      "VS-RANDOM early milestone (>80%): met=False -- measured 9/20 = 0.45 (95% CI [0.2582, 0.6579]). This is the plan's WEAK pipeline signal; not met does NOT block (不达不阻塞; the long-run target is 1000 games).",
+      "TODO-12 GATE RE-RUN (trained weights): monotonic point estimates P(200>40)=1.0, P(800>200)=1.0 on 2 games total. Samples are far below the 60 局/配对 key-gate => UNCONFIRMED (see pairings + Wilson CIs). The durable harness mcts_strength.py re-runs the full protocol later.",
+      "SOFT <2h TARGET: actual 179.5 min for the smoke chain; exceeded because this machine runs ~88-160 sims/s (not the plan's 300-600) and the smoke keeps real self-play + gates + a time-boxed todo-12 re-run inside one run."
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "phase": "ladder-sanity",
+  "rc": 0,
+  "wall_time_s": 339.23,
+  "weight_source": "loaded from models/best.pt",
+  "protocol": {
+    "levels": [
+      40,
+      200,
+      800
+    ],
+    "pairings": [
+      "40v200",
+      "200v800",
+      "40v800"
+    ],
+    "games_per_pairing_full": 1,
+    "quick_mode": true,
+    "quick_reduction": "800-sim pairings -> 30 games",
+    "games_per_pairing_effective": {
+      "40v200": 1,
+      "200v800": 1,
+      "40v800": 1
+    },
+    "random_baseline_games": 0,
+    "random_baseline_levels": [
+      40,
+      200,
+      800
+    ],
+    "max_time_min": 4.0,
+    "pairing_time_min": 6.0,
+    "tau": 1.0,
+    "komi": 7.5,
+    "max_moves": 60,
+    "c_puct": 2.5,
+    "virtual_loss": 3,
+    "master_seed": 21
+  },
+  "pairings": {
+    "40v200": {
+      "games": 1,
+      "hi_wins": 1,
+      "hi_winrate": 1.0,
+      "truncated": false,
+      "planned_games": 1,
+      "ci95": [
+        0.2065,
+        1.0
+      ]
+    },
+    "200v800": {
+      "games": 1,
+      "hi_wins": 1,
+      "hi_winrate": 1.0,
+      "truncated": false,
+      "planned_games": 1,
+      "ci95": [
+        0.2065,
+        1.0
+      ]
+    }
+  },
+  "monotonic": {
+    "P(200>40)": 1.0,
+    "P(800>200)": 1.0,
+    "P(200>40)>0.5": true,
+    "P(800>200)>0.5": true,
+    "ordering_ok": true
+  },
+  "accepted": true,
+  "games_played": 2,
+  "projected_times": {
+    "assumption": "median per-game wall time x target games (measured on this device)",
+    "40v200": {
+      "full_60_hours": 1.0461459600000125,
+      "quick_hours": 0.01743576600000021
+    },
+    "200v800": {
+      "full_60_hours": 4.606396438333347,
+      "quick_hours": 0.07677327397222244
+    },
+    "40v800": {
+      "full_60_hours": null,
+      "quick_hours": null
+    },
+    "full_protocol_total_hours": 5.65254239833336,
+    "quick_protocol_total_hours": 0.09420903997222266
+  },
+  "evidence": ".omo\\evidence\\omigamax-go\\task-21-e2e\\ladder-sanity.json",
+  "gate_note": "plan todo-12 key-gate is 60 局/配对 (--games 60). This smoke re-run used the plan's reduced-sample allowance (--games N --quick) and was time-boxed (4 min) with max_moves=60 shallow games -- 1 game per pairing is far below the key-gate sample size, so the gate is UNCONFIRMED; the monotonic point estimates are directionally OK only."
+}

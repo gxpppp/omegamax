@@ -1,0 +1,31 @@
+{
+  "phase": "match",
+  "rc": 0,
+  "wall_time_s": 3587.43,
+  "engine2": "random",
+  "sims": 40,
+  "games": 20,
+  "completed": 20,
+  "errors": 0,
+  "wins": 9,
+  "winrate": 0.45,
+  "elo_diff": -34.86,
+  "ci95": [
+    0.2582,
+    0.6579
+  ],
+  "milestone": {
+    "winrate": 0.45,
+    "wins": 9,
+    "games": 20,
+    "bar": 0.8,
+    "ci95": [
+      0.2582,
+      0.6579
+    ],
+    "met": false,
+    "note": "plan early milestone: >80% vs random-legal is a WEAK pipeline signal (不达不阻塞); NOT met unless the measured win rate is above the bar."
+  },
+  "evidence": ".omo\\evidence\\omigamax-go\\task-21-e2e\\match-vs-random.json",
+  "phase_wall_time_s": 3587.45
+}

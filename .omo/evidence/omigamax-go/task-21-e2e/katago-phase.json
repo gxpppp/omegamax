@@ -1,0 +1,5 @@
+{
+  "phase": "katago",
+  "skipped": true,
+  "reason": "not re-run in this smoke finalize pass; the vs-KataGo GTP pipeline is already proven by todo-20 evidence (task-20-demo-katago.json: 1 game vs eigen CPU b10c128, harness ran end-to-end, KataGo won as expected). KataGo is a strong baseline; a low omigamax win rate there is expected and is NOT a failure."
+}

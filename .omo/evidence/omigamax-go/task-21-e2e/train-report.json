@@ -1,0 +1,81 @@
+{
+  "phase": "train",
+  "device": "cuda",
+  "wall_time_s": 6846.09,
+  "peak_gpu_mem_gb": 1.05,
+  "protocol": {
+    "cycles": 4,
+    "games_per_cycle": 4,
+    "steps_per_cycle": 800,
+    "simulations": 60,
+    "selfplay_max_moves": 250,
+    "batch_size": 128,
+    "eval_games": 3,
+    "eval_sims": 40,
+    "eval_max_moves": 250,
+    "board_size": 19,
+    "seed": 21
+  },
+  "loop": {
+    "steps_trained": 3200,
+    "global_step_final": 3200,
+    "games_generated": 16,
+    "cycles_done": 4,
+    "positions_in_buffer": 3782,
+    "loss_first": 7.991870164871216,
+    "loss_last": 1.48984956741333,
+    "loss_decrease": true,
+    "train_step_lines": 3200,
+    "eval_gates": 5,
+    "eval_summaries": [
+      {
+        "step": 800,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -5.333
+      },
+      {
+        "step": 1600,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -10.421
+      },
+      {
+        "step": 2000,
+        "winrate": 0.6667,
+        "candidate_wins": 2,
+        "games": 3,
+        "replaced": true,
+        "elo": -4.608
+      },
+      {
+        "step": 2400,
+        "winrate": 0.6667,
+        "candidate_wins": 2,
+        "games": 3,
+        "replaced": true,
+        "elo": 0.938
+      },
+      {
+        "step": 3200,
+        "winrate": 0.3333,
+        "candidate_wins": 1,
+        "games": 3,
+        "replaced": false,
+        "elo": -4.439
+      }
+    ],
+    "loss_from": 1.080407,
+    "loss_to": 1.48985
+  },
+  "checkpoint": {
+    "latest": "models\\latest.pt",
+    "latest_exists": true,
+    "best": "models\\best.pt",
+    "best_exists": true
+  }
+}

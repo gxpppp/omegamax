@@ -1,0 +1,20 @@
+=== omigamax todo-21 end-to-end smoke report ===
+date: 2026-08-08  device: cuda
+phases run: ['train', 'match', 'ladder-sanity', 'viz']
+wall time: 10772.81s (179.5 min)  peak GPU mem: 1.05 GB
+soft <2h target: plan todo 21: 目标 <2 小时, 可调低局数达成; 3060 上该配置估算 1.5-4.5h, 硬上限不可达成 (Momus B10/Oracle #10). Actual wall time is recorded above; the target is SOFT.
+training: 16 games generated, 3200 steps trained (global step 3200), 3782 positions in replay buffer, loss 7.991870164871216 -> 1.48984956741333 (decrease=True), 5 eval gates
+eval history (step -> winrate -> elo -> replaced):
+  step 800: winrate=0.3333 elo=-5.333 replaced=False
+  step 1600: winrate=0.3333 elo=-10.421 replaced=False
+  step 2000: winrate=0.6667 elo=-4.608 replaced=True
+  step 2400: winrate=0.6667 elo=0.938 replaced=True
+  step 3200: winrate=0.3333 elo=-4.439 replaced=False
+model: models\best.pt (load OK) arch={'blocks': 10, 'channels': 128, 'board_size': 19} global_step=2400 forward={'policy_shape': [1, 362], 'value_shape': [1, 1], 'finite': True}
+vs-random: 9/20 = 0.45 (95% CI [0.2582, 0.6579]) sims=40 elo_diff=-34.86 wall=3587.43s
+  early milestone >80%: met=False  plan early milestone: >80% vs random-legal is a WEAK pipeline signal (不达不阻塞); NOT met unless the measured win rate is above the bar.
+assessment [1]: PIPELINE (todo-21 core): the zero-to-playable chain ran end-to-end -- self-play generated 16 real games, 3200 training steps, 5 eval gates, best.pt written. loss_decrease=True.
+assessment [2]: VS-RANDOM early milestone (>80%): met=False -- measured 9/20 = 0.45 (95% CI [0.2582, 0.6579]). This is the plan's WEAK pipeline signal; not met does NOT block (不达不阻塞; the long-run target is 1000 games).
+assessment [3]: TODO-12 GATE RE-RUN (trained weights): monotonic point estimates P(200>40)=1.0, P(800>200)=1.0 on 2 games total. Samples are far below the 60 局/配对 key-gate => UNCONFIRMED (see pairings + Wilson CIs). The durable harness mcts_strength.py re-runs the full protocol later.
+assessment [4]: SOFT <2h TARGET: actual 179.5 min for the smoke chain; exceeded because this machine runs ~88-160 sims/s (not the plan's 300-600) and the smoke keeps real self-play + gates + a time-boxed todo-12 re-run inside one run.
+overall assessment met: False

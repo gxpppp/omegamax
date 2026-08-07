@@ -46,3 +46,6 @@ tools/
 
 # KataGo GTP engine logs (written next to the process cwd)
 gtp_logs/
+
+# Checkpoint binaries under evidence (26MB per model; keep the small JSON/txt/png evidence)
+*.pt

@@ -1,0 +1,58 @@
+{"event": "cycle_start", "timestamp": "2026-08-07T14:52:57", "cycle": 1, "step": 0, "games": 2, "games_generated": 2}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:58", "step": 1, "loss": 7.70764, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:58", "step": 2, "loss": 7.515169, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:58", "step": 3, "loss": 7.045553, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:58", "step": 4, "loss": 7.260211, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:59", "step": 5, "loss": 7.131009, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:59", "step": 6, "loss": 6.704084, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:59", "step": 7, "loss": 7.174696, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:52:59", "step": 8, "loss": 6.572367, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:00", "step": 9, "loss": 6.937692, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:00", "step": 10, "loss": 6.322042, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:00", "step": 11, "loss": 6.284664, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:00", "step": 12, "loss": 6.718962, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:01", "step": 13, "loss": 5.693344, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:01", "step": 14, "loss": 6.757169, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:01", "step": 15, "loss": 6.611651, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:01", "step": 16, "loss": 6.630054, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:02", "step": 17, "loss": 6.885626, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:02", "step": 18, "loss": 6.765849, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:02", "step": 19, "loss": 6.851795, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:02", "step": 20, "loss": 6.618477, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:03", "step": 21, "loss": 6.458207, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:03", "step": 22, "loss": 6.650157, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:03", "step": 23, "loss": 6.255223, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:04", "step": 24, "loss": 6.166624, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:53:04", "step": 25, "loss": 6.568013, "lr": 0.2, "games": 11, "elo": 0.0, "cycle": 1}
+{"event": "eval_gate", "timestamp": "2026-08-07T14:54:20", "step": 25, "cycle": 1, "winrate": 0.0, "replaced": false, "elo": -16.0}
+{"event": "loop_end", "timestamp": "2026-08-07T14:54:20", "step": 25, "total_steps": 25, "cycles_completed": 1, "games_generated": 2, "elo": -16.0}
+{"event": "cycle_start", "timestamp": "2026-08-07T14:55:29", "cycle": 1, "step": 25, "games": 2, "games_generated": 4}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:29", "step": 26, "loss": 6.589406, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:30", "step": 27, "loss": 6.378094, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:30", "step": 28, "loss": 5.77282, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:30", "step": 29, "loss": 6.000285, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:30", "step": 30, "loss": 5.618307, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:31", "step": 31, "loss": 6.486961, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "interrupt", "timestamp": "2026-08-07T14:55:31", "step": 31, "total_steps": 6, "cycles_completed": 0, "games_generated": 4}
+{"event": "loop_resume", "timestamp": "2026-08-07T14:55:42", "step": 31, "games_generated": 4, "steps_into_cycle": 6}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:43", "step": 32, "loss": 6.409922, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:43", "step": 33, "loss": 6.147981, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:43", "step": 34, "loss": 6.535477, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:43", "step": 35, "loss": 6.436012, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:44", "step": 36, "loss": 6.070039, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:44", "step": 37, "loss": 5.706669, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:44", "step": 38, "loss": 7.327624, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:44", "step": 39, "loss": 6.223626, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:45", "step": 40, "loss": 6.644296, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:45", "step": 41, "loss": 6.513554, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:45", "step": 42, "loss": 6.381467, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:45", "step": 43, "loss": 6.559909, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:46", "step": 44, "loss": 6.291244, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:46", "step": 45, "loss": 6.362987, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:46", "step": 46, "loss": 6.134417, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:46", "step": 47, "loss": 6.489042, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:47", "step": 48, "loss": 5.972753, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:47", "step": 49, "loss": 8.080951, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "train_step", "timestamp": "2026-08-07T14:55:47", "step": 50, "loss": 9.138617, "lr": 0.2, "games": 11, "elo": -16.0, "cycle": 1}
+{"event": "eval_gate", "timestamp": "2026-08-07T14:57:06", "step": 50, "cycle": 1, "winrate": 0.3333333333333333, "replaced": false, "elo": -20.597}
+{"event": "loop_end", "timestamp": "2026-08-07T14:57:06", "step": 50, "total_steps": 19, "cycles_completed": 1, "games_generated": 4, "elo": -20.597}
