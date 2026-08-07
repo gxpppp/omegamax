@@ -3,7 +3,7 @@
 **一个从零手写的 AlphaGo Zero 风格围棋 AI 引擎。** 规则引擎、策略-价值神经网络、MCTS 树搜索、自我对弈训练闭环全部原创实现，无任何开源棋手代码/权重作为本体；KataGo 仅作评测对手。训练过程中 pygame 窗口实时展示黑 vs 白自对弈棋局与训练指标，训练出的模型可通过标准 GTP 引擎协议对外对弈（为日后联机平台接入预留标准接口）。
 
 - 语言/栈：Python 3.12 + PyTorch（CUDA 13）+ uv
-- 硬件基线：单卡 RTX 3060 6GB（b10c128，约 3M 参数网络可训）
+- 硬件基线：单卡 RTX 3060 Laptop GPU 6GB（b10c128，约 3M 参数网络可训）
 - 路径：`omigamax/` 包（rules / network / mcts / train / viz / gtp / cli 六组件）
 - 文档：配置详解 → [`docs/config.md`](docs/config.md) ｜ 训练运维 → [`docs/ops.md`](docs/ops.md)
 
@@ -23,7 +23,7 @@
 
 ## 安装
 
-前置：Windows 10、Python 3.12、[uv](https://docs.astral.sh/uv/)、NVIDIA 驱动（CUDA 13 兼容，RTX 3060 实测驱动 581.08）。
+前置：Windows 10、Python 3.12、[uv](https://docs.astral.sh/uv/)、NVIDIA 驱动（CUDA 13 兼容，RTX 3060 Laptop GPU 实测驱动 581.08）。
 
 ```powershell
 cd E:\AAAhuancun\betamaster
@@ -38,7 +38,7 @@ uv sync                       # 创建 .venv 并安装依赖（torch==2.13.0+cu1
 
 ```powershell
 uv run python -c "import torch,pygame,yaml;print(torch.__version__,torch.cuda.is_available(),torch.cuda.get_device_name(0))"
-# 期望输出：2.x.x+cu130 True NVIDIA GeForce RTX 3060
+# 期望输出：2.x.x+cu130 True NVIDIA GeForce RTX 3060 Laptop GPU
 ```
 
 **2. 训练冒烟**（低配置完整跑一轮：自对弈→训练→评估门控，产出 `latest.pt` + `best.pt`）：
@@ -59,7 +59,7 @@ uv run python -m omigamax.cli.viz_smoke --capture logs/viz_capture.png
 uv run python -m omigamax.cli.match --engine2 random --games 1 --sims 40
 ```
 
-完整测试：`uv run pytest -q`（414 用例，全绿）。
+完整测试：`uv run pytest -q`（431 用例，全绿）。
 
 ## CLI 一览
 
@@ -68,7 +68,7 @@ uv run python -m omigamax.cli.match --engine2 random --games 1 --sims 40
 | `python -m omigamax.train.loop [--smoke] [--resume] [--cycles N]` | 训练主循环（可中断恢复） |
 | `python -m omigamax.train.selfplay --games N --simulations S` | 自对弈生成 (s, π, z) 样本 |
 | `python -m omigamax.cli.match --engine2 katago\|random --games N [--sims S]` | 自动对弈评测（胜率/ELO/SGF） |
-| `python -m omigamax.cli.play --model models/best.pt [--vs omigamax\|random]` | 终端人机对弈 |
+| `python -m omigamax.cli.play --model models/best.pt [--vs omigamax\|random] [--max-moves N]` | 终端人机对弈（两连 pass 终局结算；`--max-moves` 达上限强制结算，默认 300） |
 | `python -m omigamax.cli.gtp_main [--model models/best.pt] [--simulations S]` | 标准 GTP 引擎（stdin/stdout 协议） |
 | `python -m omigamax.cli.e2e_smoke` | 端到端全链路冒烟（零到可对弈模型） |
 | `python -m omigamax.cli.viz_smoke [--capture png]` | 可视化冒烟/无头截图 |

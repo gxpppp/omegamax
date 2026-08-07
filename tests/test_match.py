@@ -97,6 +97,21 @@ class BadEngine(AlwaysPassEngine):
         return True, ""
 
 
+class NeverPassEngine(RandomEngine):
+    """A random-legal engine that never passes (forces the move-cap path)."""
+
+    name = "neverpass"
+
+    def _genmove(self, color):
+        points = [
+            (r, c)
+            for r in range(self.size)
+            for c in range(self.size)
+            if self.board.is_legal((r, c), color)
+        ]
+        return points[int(self.rng.integers(0, len(points)))]
+
+
 class FakeGTPClient:
     """Replacement for ``match_mod.GTPClient``: records the GTP exchange."""
 
@@ -394,6 +409,56 @@ def test_play_quit_requested():
 def test_play_invalid_coordinate_reprompts():
     record, text = _play_session("Z9\npass\npass\n")
     assert "invalid coordinate" in text
+    assert record["moves"] == 2
+
+
+# ---------------------------------------------------------------------------
+# F3 FIX 2: vs-engine games must be able to end -- the --max-moves cap
+# terminates a never-passing engine with a clear score message, and after a
+# human pass an engine that replies with a move triggers a hint (the game
+# only ends on two consecutive passes).
+# ---------------------------------------------------------------------------
+
+def test_play_move_cap_terminates_with_score():
+    out = io.StringIO()
+    inp = io.StringIO("pass\npass\npass\npass\n")
+    record = play_session(
+        "models/best.pt", vs="omigamax", size=9, human_color="B",
+        engine=NeverPassEngine(size=9, seed=0),
+        max_moves=5, stdin=inp, stdout=out,
+    )
+    text = out.getvalue()
+    assert record["moves"] == 5
+    assert record["capped"] is True
+    assert record["forced_terminal"] is True
+    assert record["result"]  # score still reported at the cap
+    assert "Move limit reached (5 moves)" in text
+    assert "Game over" not in text
+
+
+def test_play_engine_reply_after_human_pass_shows_hint():
+    out = io.StringIO()
+    inp = io.StringIO("pass\npass\npass\n")
+    record = play_session(
+        "models/best.pt", vs="omigamax", size=9, human_color="B",
+        engine=NeverPassEngine(size=9, seed=0),
+        max_moves=4, stdin=inp, stdout=out,
+    )
+    text = out.getvalue()
+    # the human passed twice and the engine answered with a move each time
+    assert text.count(
+        "[info] engine did not pass -- game continues (pass twice in a row to end)"
+    ) == 2
+    assert record["capped"] is True
+    assert "Move limit reached (4 moves)" in text
+
+
+def test_play_two_passes_still_end_normally():
+    # FIX 2 must not break the two-pass terminal path: when the engine DOES
+    # pass after a human pass the game ends normally with a "Game over".
+    record, text = _play_session("pass\npass\n")
+    assert "Game over" in text
+    assert record["capped"] is False
     assert record["moves"] == 2
 
 

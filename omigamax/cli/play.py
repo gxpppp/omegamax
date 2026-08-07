@@ -7,7 +7,12 @@ via MCTS (``--vs omigamax``, default, at ``--sims`` simulations under the
 todo-15 evaluation discipline -- no noise, tau=0) or via a seeded
 uniform-random-legal engine (``--vs random``, the acceptance's fast path).
 The game ends at two consecutive passes (Tromp-Taylor); the score is reported
-from the final position with komi on white.
+from the final position with komi on white. A ``--max-moves`` cap (default
+300) terminates long vs-engine games at the limit with a "reached move limit"
+score message instead of silently grinding to 1000+ moves. After the human
+passes, if the engine replies with a move (a weak engine rarely passes) a hint
+is printed -- the game only ends when both sides pass in a row, so the human
+should pass again.
 
 Terminal rendering: a plain monospace text board (column letters A-T skipping
 I, row numbers 1..N with row 1 at the bottom edge, GTP orientation), last
@@ -39,7 +44,9 @@ from omigamax.cli.match import GTPEngineInProcess, RandomEngine
 DEFAULT_MODEL = "models/best.pt"
 DEFAULT_KOMI = 7.5
 DEFAULT_SIZE = 19
-DEFAULT_MAX_MOVES = 1000
+# Default per-session move cap: weak engines rarely pass, so an uncapped
+# vs-engine game would otherwise grind on past 1000 moves with no way out.
+DEFAULT_MAX_MOVES = 300
 
 _COLUMNS = "ABCDEFGHJKLMNOPQRST"
 _COLOR_NAME = {BLACK: "Black", WHITE: "White"}
@@ -126,6 +133,8 @@ def play_session(
     move_list: "list[tuple]" = []
     last = None
     quit_requested = False
+    capped = False
+    human_passed = False  # did the human just pass on the last turn?
     while not board.is_terminal() and len(move_list) < max_moves:
         color = BLACK if len(board.moves) % 2 == 0 else WHITE
         tok = _COLOR_TOK[color]
@@ -144,6 +153,7 @@ def play_session(
             if not ok:
                 raise RuntimeError(f"engine rejected human move "
                                    f"{move_gtp!r}: {resp!r}")
+            human_passed = move_gtp == "pass"
         else:
             ok, resp = engine.command(f"genmove {tok}")
             if not ok:
@@ -162,12 +172,25 @@ def play_session(
         board.play(move, color)
         move_list.append((move, color))
         last = move
+        if color != human and human_passed and move is not None:
+            # the human passed but the engine replied with a move -- the game
+            # only ends on two *consecutive* passes, so tell the human to pass
+            # again (weak engines rarely pass on their own).
+            out.write("[info] engine did not pass -- game continues "
+                      "(pass twice in a row to end)\n")
+            out.flush()
+    else:
+        if len(move_list) >= max_moves and not board.is_terminal():
+            capped = True
 
     winner = board.winner(komi)
     result = board.result_string(komi) if not quit_requested else None
     out.write("\n" + render_board(board, last_move=last) + "\n")
     if quit_requested:
         out.write("Quit -- game not finished.\n")
+    elif capped:
+        out.write(f"Move limit reached ({max_moves} moves): {result} "
+                  f"(winner {winner}, komi {komi:g})\n")
     else:
         out.write(f"Game over: {result} (winner {winner}, komi {komi:g})\n")
     out.flush()
@@ -197,6 +220,7 @@ def play_session(
         "moves": len(move_list),
         "quit_requested": quit_requested,
         "forced_terminal": not board.is_terminal(),
+        "capped": capped,
         "sgf": str(sgf_path) if sgf_path is not None else None,
         "move_list": [None if m is None else list(m) for m, _ in move_list],
         "color_list": ["B" if c == BLACK else "W" for _, c in move_list],
@@ -242,7 +266,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="omigamax.cli.play",
         description="omigamax todo-20 human-vs-engine CLI play: terminal "
                     "board, GTP coordinate input, MCTS (or random) replies, "
-                    "two-pass terminal with the score reported.",
+                    "two-pass terminal with the score reported; a --max-moves "
+                    "cap ends long games with a clear score message.",
     )
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                         help=f"omigamax checkpoint (default {DEFAULT_MODEL})")
@@ -262,7 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="human colour (default B)")
     parser.add_argument("--seed", type=int, default=0, help="engine seed")
     parser.add_argument("--max-moves", type=int, default=DEFAULT_MAX_MOVES,
-                        help=f"move cap per session (default {DEFAULT_MAX_MOVES})")
+                        help=f"move cap per session; games that reach it end "
+                             f"with a score message (default {DEFAULT_MAX_MOVES})")
     parser.add_argument("--sgf-dir", type=str, default=None,
                         help="write the finished game's SGF here "
                              "(default: none)")

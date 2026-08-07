@@ -77,9 +77,16 @@ uv run python -m omigamax.cli.match --engine2 katago --games 9
 # 终端人机对弈
 uv run python -m omigamax.cli.play --model models/best.pt --vs random
 
+# vs 引擎（MCTS）人机对弈；--max-moves 达上限强制终局结算
+uv run python -m omigamax.cli.play --model models/best.pt --vs omigamax --board-size 19 --max-moves 60
+
 # 标准 GTP 引擎（stdin/stdout；供平台/外部 GUI 驱动）
 uv run python -m omigamax.cli.gtp_main --model models/best.pt --simulations 200
 ```
+
+对局以两连 pass 正常终局（Tromp-Taylor 结算）。人类 pass 后若引擎仍落子（弱引擎几乎不主动 pass），会提示
+`[info] engine did not pass -- game continues (pass twice in a row to end)`，再 pass 一次即可终局；
+`--max-moves`（默认 300）兜底：达到上限强制结算并输出得分，避免弱引擎对局无限拖到 1000+ 手。
 
 KataGo 启动依赖 `tools/katago/` 下的官方 Windows 二进制与权重（todo 5/20 已下载；.gitignore 排除 tools/ 不提交）。
 
@@ -90,7 +97,7 @@ KataGo 启动依赖 `tools/katago/` 下的官方 Windows 二进制与权重（to
 **实测与本机性能直接挂钩，与计划预估有偏差：**
 
 - **实测吞吐 ~88-160 sims/s**（计划预估 300-600 sims/s）。纯 Python MCTS + 6GB GPU 网络前向是本机瓶颈。
-- **单局时长**：19×19 自对弈弱模型对局实测约 2.9 分钟/局（弱模型局可跑到 1000 手上限）。
+- **单局时长**：19×19 自对弈弱模型对局实测约 2.9 分钟/局（弱模型局常跑到 `--max-moves` 上限，默认 300）。
 - **训练时间预期**：
   - `loop --smoke`（2 局 + 25 步 + 强制评估）：分钟级，可在 3060 上完整跑通。
   - 默认 cycle（100 局 + 1000 步 + 评估）：以 ~100 sims/s 估算，单 cycle 数小时级（`simulations=200` 时更慢）。

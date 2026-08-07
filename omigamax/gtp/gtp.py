@@ -59,12 +59,16 @@ Model loading: ``GTPEngine(model_path=...)`` accepts either a todo-14
 checkpoint (``models/best.pt`` -- ``arch`` + ``model_state_dict``) or a plain
 ``state_dict`` (architecture inferred from tensor shapes). Without a model the
 engine still answers every protocol command and ``genmove`` falls back to a
-uniform-random legal move. ``boardsize``/``loadsgf`` to a size that does not
-match the loaded network rebuild a random-init network for that size.
+uniform-random legal move. The requested board size is authoritative:
+``GTPEngine(board_size=...)``, ``boardsize`` and ``loadsgf`` to a size that
+does not match the loaded checkpoint rebuild a random-init network for that
+size (strength degraded, warning logged) instead of forcing the checkpoint's
+own size.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import sys
 from pathlib import Path
@@ -84,6 +88,8 @@ GTP_COLUMNS = "ABCDEFGHJKLMNOPQRST"
 
 ENGINE_NAME = "omigamax"
 VERSION = "0.1.0"
+
+logger = logging.getLogger(__name__)
 
 # Acceptable board sizes for the GTP engine (rules engine is parameterized).
 MIN_SIZE = 2
@@ -296,20 +302,47 @@ class GTPEngine:
         self._set_network(net)
 
     def _load_model(self, path: Path) -> int:
-        """Load a checkpoint or raw state_dict; returns its board size."""
+        """Load a checkpoint or raw state_dict; returns its board size.
+
+        The requested board size (:attr:`size` -- from the constructor's
+        ``board_size`` or a ``boardsize``/``loadsgf`` command) is
+        authoritative. A checkpoint whose native board size differs from it
+        is **not** force-loaded at the wrong size (that would yield
+        out-of-bounds coordinates, e.g. a 19x19 ``T14`` against a 9x9
+        board). Instead a random-init network of the requested size is built
+        with the checkpoint's blocks/channels and a warning is logged --
+        the same rebuild-for-a-new-size behaviour as
+        :meth:`_ensure_network_for_size`, so the session stays consistent
+        (strength degraded). A same-size checkpoint loads normally.
+        """
         if not path.exists():
             raise FileNotFoundError(f"model file not found: {path}")
         state = torch.load(path, map_location=self.device, weights_only=True)
         if isinstance(state, dict) and "arch" in state and "model_state_dict" in state:
             a = state["arch"]
-            size = int(a["board_size"])
-            net = create_model(int(a["blocks"]), int(a["channels"]), size).to(self.device)
-            net.load_state_dict(state["model_state_dict"])
+            native = int(a["board_size"])
+            blocks, channels = int(a["blocks"]), int(a["channels"])
+            if native == self.size:
+                net = create_model(blocks, channels, native).to(self.device)
+                net.load_state_dict(state["model_state_dict"])
+            else:
+                logger.warning(
+                    "checkpoint trained on %dx%d; building random-init %dx%d "
+                    "network -- strength degraded",
+                    native, native, self.size, self.size,
+                )
+                net = create_model(blocks, channels, self.size).to(self.device)
         else:
-            size, net = _build_from_state_dict(state, self.device)
-        self.size = size
+            native, net = _build_from_state_dict(state, self.device)
+            if native != self.size:
+                logger.warning(
+                    "state_dict trained on %dx%d; building random-init %dx%d "
+                    "network -- strength degraded",
+                    native, native, self.size, self.size,
+                )
+                net = create_model(net.blocks, net.channels, self.size).to(self.device)
         self._set_network(net)
-        return size
+        return native
 
     def _ensure_network_for_size(self) -> None:
         if self._network is not None and self._network.board_size != self.size:

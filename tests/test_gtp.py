@@ -510,3 +510,66 @@ def test_subprocess_pipe_session(tmp_path):
     assert coord is not None, f"no genmove response in output: {out!r}"
     board = Board(9)
     assert board.is_legal(parse_vertex(coord, 9), WHITE)
+
+
+# ---------------------------------------------------------------------------
+# F3 FIX 1: the requested board size is authoritative over the checkpoint's
+# native size. A 19x19-trained checkpoint loaded for a 9x9 session must NOT
+# silently resize the session to 19 (that yields out-of-bounds 19x19 coords
+# like T14 against the 9x9 board -- the reported crash); instead a 9x9
+# network is built and genmove returns a 9x9-legal move.
+# ---------------------------------------------------------------------------
+
+BEST_PT = PROJECT_ROOT / "models" / "best.pt"
+
+_NEEDS_BEST_PT = pytest.mark.skipif(
+    not BEST_PT.exists(), reason="models/best.pt not present"
+)
+
+
+@_NEEDS_BEST_PT
+def test_checkpoint_mismatch_builds_requested_size_network():
+    eng = GTPEngine(
+        model_path=BEST_PT, board_size=9, simulations=8, device="cpu", seed=0,
+    )
+    # the session stays 9x9 and the network matches the requested size
+    assert eng.size == 9
+    assert eng._network.board_size == 9
+    # genmove returns a coordinate (or pass) that is legal on the 9x9 board
+    # (parse_vertex raises for any out-of-bounds/19x19 coord like T14)
+    text = response(eng, "genmove b")
+    assert text.startswith("= ")
+    move = parse_vertex(text[2:], 9)
+    if move is not None:
+        assert eng.board.get(*move) == BLACK
+    assert len(eng.board.moves) == 1
+
+
+@_NEEDS_BEST_PT
+def test_checkpoint_board_size_19_path_unchanged():
+    # the 19x19 session still loads the 19x19 checkpoint normally
+    eng = GTPEngine(
+        model_path=BEST_PT, board_size=19, simulations=8, device="cpu", seed=0,
+    )
+    assert eng.size == 19
+    assert eng._network.board_size == 19
+
+
+@_NEEDS_BEST_PT
+def test_same_size_load_yields_trained_network():
+    # a same-size load actually loads the trained weights (not a rebuild),
+    # spot-checked by an identical input-conv weight and a finite forward.
+    eng = GTPEngine(
+        model_path=BEST_PT, board_size=19, simulations=8, device="cpu", seed=0,
+    )
+    ckpt = torch.load(BEST_PT, map_location="cpu", weights_only=True)
+    got = eng._network.state_dict()["input_conv.weight"]
+    assert torch.equal(
+        got, ckpt["model_state_dict"]["input_conv.weight"]
+    ), "trained weights not loaded"
+    with torch.no_grad():
+        p, v = eng._network(torch.zeros(1, 17, 19, 19))
+    assert tuple(p.shape) == (1, 362)
+    assert tuple(v.shape) == (1, 1)
+    assert bool(torch.isfinite(p).all())
+    assert bool(torch.isfinite(v).all())

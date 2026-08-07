@@ -1,0 +1,71 @@
+Task F3-fix -- F3 手动 QA 修复
+Date: 2026-08-08
+HEAD before: 93186c4 (425 tests green)
+
+====================================================================
+1. TEST SUITE
+====================================================================
+uv run pytest -q  (full output: logs via shell)
+Result: 431 passed, 1 warning in 36.07s   (425 + 6 new)
+  tests/test_gtp.py:  +3  (FIX 1 regression: 9x9 over 19x19 checkpoint,
+                          19x19 path unchanged, same-size trained network)
+  tests/test_match.py: +3  (FIX 2 regression: move-cap terminates with score,
+                          hint after human pass + engine move, two-pass path)
+
+====================================================================
+2. FIX 1 (CRITICAL) -- GTPEngine honors the requested board size
+====================================================================
+Root cause: _load_model() overwrote the constructor's board_size with the
+checkpoint's native 19x19 -> 9x9 session generated 19x19 coords (T14)
+against the 9x9 board -> RuntimeError traceback, exit 1.
+Fix: when the checkpoint's arch board_size != requested size, build a
+random-init network for the REQUESTED size with the checkpoint's
+blocks/channels and log a warning; same-size checkpoints load normally.
+
+Live proof A -- CLI play on 9x9 (exit 0, no crash, 54 legal 9x9 moves):
+  "" | uv run python -m omigamax.cli.play --vs omigamax --board-size 9 --sims 40 --evidence <tmp>/f3-fix1-play.json
+  Output tail: 9x9 board rendered ... "Game over: W+33.5 (winner W, komi 7.5)"
+  Evidence JSON: board_size=9, moves=54, result=W+33.5,
+                 out_of_bounds=[] (all 54 moves within rows/cols 0..8),
+                 quit=False, capped=False
+
+Live proof B -- GTP engine (warning + legal 9x9 genmove):
+  "" | uv run python -m omigamax.cli.gtp_main --model models/best.pt --board-size 9 --simulations 16
+  stderr: "WARNING  omigamax.gtp.gtp: checkpoint trained on 19x19; building
+           random-init 9x9 network -- strength degraded"
+  GTP: boardsize 9 -> "= ", clear_board -> "= ", genmove b -> "= B7"  (legal 9x9)
+
+====================================================================
+3. FIX 2 (UX) -- vs-engine games can end: --max-moves cap + pass hint
+====================================================================
+Fix: DEFAULT_MAX_MOVES 1000 -> 300; at the cap the session prints
+"Move limit reached (N moves): <score>" instead of silently grinding;
+after a human pass, an engine that replies with a move prints
+"[info] engine did not pass -- game continues (pass twice in a row to end)";
+the two-pass terminal path is unchanged.
+
+Live proof -- scripted 19x19 session capped at 60 moves:
+  "" | uv run python -m omigamax.cli.play --vs omigamax --board-size 19 --max-moves 60 --evidence <tmp>/f3-fix2-play.json
+  Output: "Move limit reached (60 moves): W+368.5 (winner W, komi 7.5)"
+  Evidence JSON: board_size=19, moves=60, capped=True, forced_terminal=True,
+                 result=W+368.5, winner=W
+
+Live proof -- pass hint printed after human pass + engine move:
+  "" | uv run python -m omigamax.cli.play --vs omigamax --board-size 9 --sims 16 --max-moves 3
+  Output:
+    [info] engine did not pass -- game continues (pass twice in a row to end)
+    Move limit reached (3 moves): W+88.5 (winner W, komi 7.5)
+
+Two-pass path (engine DOES pass after a human pass -> normal end):
+  tests/test_match.py::test_play_two_passes_still_end_normally
+  tests/test_match.py::test_play_scripted_session_completes  -> "Game over"
+
+====================================================================
+4. FILES CHANGED
+====================================================================
+omigamax/gtp/gtp.py       _load_model honors requested board_size (+logging)
+omigamax/cli/play.py      --max-moves default 300, cap score message, pass hint
+tests/test_gtp.py         +3 FIX 1 regression tests
+tests/test_match.py       +3 FIX 2 regression tests (NeverPassEngine)
+README.md                 431 用例; RTX 3060 Laptop GPU device name; play row
+docs/ops.md               max-moves + hint docs; 300-move cap note
