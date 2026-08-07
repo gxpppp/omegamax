@@ -144,11 +144,15 @@ class TestEvalDue:
 
 
 # ---------------------------------------------------------------------------
-# lazy visualization (todo 17 absent)
+# lazy visualization (todo 17 mount point)
 # ---------------------------------------------------------------------------
 
 class TestLazyViz:
-    def test_viz_enabled_but_module_absent_warns_and_continues(self, caplog):
+    def test_viz_enabled_but_module_absent_warns_and_continues(
+            self, caplog, monkeypatch):
+        """Graceful degradation when ``board_window`` is unavailable."""
+        import sys
+        monkeypatch.setitem(sys.modules, "omigamax.viz.board_window", None)
         logger = logging.getLogger("test_viz_absent")
         caplog.set_level(logging.WARNING, logger="test_viz_absent")
         out = loop.start_viz_if_available({"viz_enabled": True}, logger=logger)
@@ -162,7 +166,8 @@ class TestLazyViz:
         assert out["reason"] == "disabled_by_config"
 
     def test_loop_runs_with_viz_enabled_true(self, tmp_path, monkeypatch):
-        """The full loop with viz_enabled=true and no todo-17 module: no crash."""
+        """The full loop with viz_enabled=true and the todo-17 module present:
+        a viz thread is started and cleanly stopped; the loop completes."""
         monkeypatch.setattr(loop, "generate_games", fake_generate_games)
         monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
         report = loop.run_loop(
@@ -175,7 +180,13 @@ class TestLazyViz:
             cycles=1, games_per_cycle=2, steps_per_cycle=3,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        assert report["protocol"]["viz"]["reason"] == "module_unavailable"
+        viz = report["protocol"]["viz"]
+        assert viz["reason"] == "available"
+        assert viz["started"] is True
+        # the run's own cleanup stopped the daemon thread
+        thread = viz["thread"]
+        thread.join(timeout=2)
+        assert thread.stopped is True
         assert report["loop"]["interrupted"] is False
         assert report["checkpoint"]["latest_exists"] is True
 

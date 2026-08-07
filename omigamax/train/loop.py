@@ -29,11 +29,13 @@ Per the plan (todo 16, authoritative) and AGZ (Nature 550, 2017, Methods fig. 1)
   ``elo`` (last evaluation-gate rating) / ``timestamp`` (plan, Oracle G2 --
   the acceptance asserts loss/elo fields on >= 20 lines);
 * **lazy visualization** (plan, Oracle #9/F3): when ``config viz_enabled=true``
-  the loop attempts to mount the todo-17 pygame thread through a *lazy import*
-  (:func:`start_viz_if_available`). While ``omigamax.viz`` has no
-  ``board_window`` module yet (todo 17 is a later wave) the loop logs a warning
-  and continues in pure-log mode -- it never crashes a training run; ``--viz
-  off`` force-disables the mount.
+  the loop mounts the todo-17 pygame thread through a *lazy import*
+  (:func:`start_viz_if_available`): it starts a daemon
+  :class:`~omigamax.viz.board_window.VizThread` over a bounded snapshot queue
+  and returns a handle (``queue`` / ``thread`` / ``stop``). Any failure
+  (module absent, pygame init error, ...) degrades to pure-log mode with a
+  warning -- it never crashes a training run; ``--viz off`` force-disables
+  the mount. The thread is stopped cleanly at the end of the run.
 
 Single-process self-play only (plan Must-NOT: no multiprocessing yet).
 
@@ -137,30 +139,43 @@ def eval_due(step_after: int, *, cycle_end: bool, eval_interval_steps: int) -> b
 def start_viz_if_available(cfg: dict, logger=None) -> dict:
     """Mount-point for the todo-17 pygame visualization (lazy, optional).
 
-    Per the plan (Oracle #9/F3): the config default ``viz_enabled=true`` must
-    not crash a training run while ``omigamax.viz`` is only a skeleton. The
-    import is deferred inside this function; any failure (module absent,
-    pygame init error, ...) degrades to pure-log mode with a warning. Todo 17
-    fills in the thread startup behind the successful-import branch.
+    Per the plan (Oracle #9/F3, todo 16/17): the config default
+    ``viz_enabled=true`` must never crash a training run. The import of
+    ``omigamax.viz.board_window`` is deferred inside this function; any
+    failure (module absent, pygame init error, ...) degrades to pure-log mode
+    with a warning and the training loop keeps running.
 
-    Returns a small dict describing the outcome (``started`` + ``reason``);
-    the training loop keeps running either way.
+    On success a :class:`VizThread` is started over a bounded
+    :class:`SnapshotQueue` (todo 17: window close only stops the thread, it
+    never interrupts training). The handle carries ``queue`` (the channel the
+    self-play/training loop pushes frames to), ``thread`` and a ``stop``
+    callable the loop uses to clean up at the end of a run.
+
+    Returns a small dict describing the outcome (``started`` + ``reason`` +
+    handle); the training loop keeps running either way.
     """
     logger = logger or log
     if not bool(cfg.get("viz_enabled", True)):
         return {"started": False, "reason": "disabled_by_config"}
     try:
-        from omigamax.viz.board_window import VizThread  # noqa: F401
-    except Exception as exc:  # ImportError / pygame init / anything (todo 17)
+        from omigamax.viz.board_window import SnapshotQueue, VizThread
+    except Exception as exc:  # ImportError / pygame / anything
         logger.warning(
-            "viz module unavailable (todo 17 not installed yet): %s "
-            "-- continuing in pure-log mode", exc)
+            "viz module unavailable: %s -- continuing in pure-log mode", exc)
         return {"started": False, "reason": "module_unavailable",
                 "error": str(exc)}
-    # todo 17: start VizThread over a self-play snapshot queue and return a
-    # handle here. Until then the mount point is a no-op by design.
-    logger.info("viz module available -- visualization mount point active")
-    return {"started": True, "reason": "available"}
+    try:
+        queue = SnapshotQueue(maxlen=int(cfg.get("viz_queue_size", 32)))
+        thread = VizThread(queue, logger=logger)
+        thread.start()
+    except Exception as exc:
+        logger.warning("viz thread failed to start: %s -- "
+                       "continuing in pure-log mode", exc)
+        return {"started": False, "reason": "thread_failed",
+                "error": str(exc)}
+    logger.info("viz thread started -- visualization mount point active")
+    return {"started": True, "reason": "available",
+            "queue": queue, "thread": thread, "stop": thread.stop}
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +579,16 @@ def run_loop(
             "loop end: %d steps trained this run (global step %d, %d cycles, "
             "final elo %.3f)", total_steps, global_step, cycles_done,
             current_elo)
+
+    # tidy up the todo-17 viz thread (daemon anyway, but a clean stop prevents
+    # leaked windows/threads on every run); never breaks the loop itself.
+    stop_viz = viz.get("stop")
+    if stop_viz is not None:
+        try:
+            stop_viz()
+            viz.get("thread").join(timeout=2)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("viz stop raised (ignored)", exc_info=True)
 
     return {
         "todo": 16,
