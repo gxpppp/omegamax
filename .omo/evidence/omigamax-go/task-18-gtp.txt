@@ -1,0 +1,144 @@
+﻿================================================================================
+omigamax-go todo 18: GTP engine (task-18-gtp.txt)
+Date: 2026-08-07 15:50:04
+Commit base: b162639 (todo 17) -- HEAD before this todo
+================================================================================
+
+IMPLEMENTED (omigamax/gtp/gtp.py + omigamax/cli/gtp_main.py + tests/test_gtp.py)
+
+Command set (GTP v2, per plan todo 18):
+  protocol_version / name / version / known_command / list_commands / quit
+  boardsize / clear_board / komi / play / genmove
+  fixed_handicap / place_free_handicap / set_free_handicap
+  loadsgf / kgs-time_settings / time_left / final_score / printsgf
+  (kgs-chat handled silently -> empty response; unknown commands -> "? unknown command")
+
+Response format (GTP v2 spec):
+  "=id <text>" on success / "?id <text>" on error, id echoed only when the
+  client supplied one; blank line terminates every frame; multi-line responses
+  (list_commands) continue on bare lines.
+
+Coordinate conversion:
+  GTP columns A-T skipping I, rows 1..N (row 1 = bottom; rules engine uses
+  0-based (row, col) with row 0 = top). A1=(18,0), T19=(0,18). pass = "pass".
+
+Move generation (genmove):
+  Existing MCTS (run_search + BatchedNetworkEvaluator), evaluation discipline:
+  NO Dirichlet root noise, tau=0 (argmax) -- deterministic GTP play. Legality
+  fallback keeps the sampled action legal for the requested colour (handicap
+  parity). Terminal board -> genmove returns "pass".
+
+Time control stubs (per plan: simplified budget-mapping stub; full byo-yomi
+clock deferred):
+  kgs-time_settings <main> <byo> <stones> (3-arg GNU Go/KGS form) parsed and
+  mapped to a search budget: per_move = main/250, sims = clamp(per_move*100,
+  8..800); 0-main falls back to byo/stone. KataGo's 4-arg clock-type variant
+  (byoyomi/absolute/none/canadian prefix) also accepted for interop.
+  time_left <color> <time> <stones>: accepted + stored, no budget change (stub).
+
+Windows pipe handling (gtp_main.py):
+  stdout reconfigured newline="\n" + line_buffering (LF-only output, no CRLF
+  translation); stdin universal-newlines + rstrip("\r\n") (CRLF tolerated);
+  explicit flush after every response frame; python -u documented as optional.
+
+Handicap: fixed/place/set_free_handicap use the standard star-point pattern
+  (19/13/9 sizes); after handicap WHITE always moves first (engine tracks the
+  count). final_score errors "? game not finished" until two consecutive passes.
+
+================================================================================
+ACCEPTANCE 1: uv run pytest tests/test_gtp.py -v  -> exit 0
+================================================================================
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- E:\AAAhuancun\betamaster\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: E:\AAAhuancun\betamaster
+configfile: pyproject.toml
+collecting ... collected 37 items
+
+tests/test_gtp.py::test_protocol_version PASSED                          [  2%]
+tests/test_gtp.py::test_name_and_version PASSED                          [  5%]
+tests/test_gtp.py::test_known_command PASSED                             [  8%]
+tests/test_gtp.py::test_list_commands PASSED                             [ 10%]
+tests/test_gtp.py::test_id_echo PASSED                                   [ 13%]
+tests/test_gtp.py::test_boardsize_clears_board_and_resizes PASSED        [ 16%]
+tests/test_gtp.py::test_boardsize_rejects_invalid PASSED                 [ 18%]
+tests/test_gtp.py::test_clear_board_resets_position PASSED               [ 21%]
+tests/test_gtp.py::test_komi PASSED                                      [ 24%]
+tests/test_gtp.py::test_play_legal_and_pass PASSED                       [ 27%]
+tests/test_gtp.py::test_play_illegal_occupied PASSED                     [ 29%]
+tests/test_gtp.py::test_play_suicide_rejected PASSED                     [ 32%]
+tests/test_gtp.py::test_play_out_of_turn_is_lenient PASSED               [ 35%]
+tests/test_gtp.py::test_play_malformed PASSED                            [ 37%]
+tests/test_gtp.py::test_coordinate_roundtrip PASSED                      [ 40%]
+tests/test_gtp.py::test_coordinate_skips_i PASSED                        [ 43%]
+tests/test_gtp.py::test_coordinate_out_of_bounds PASSED                  [ 45%]
+tests/test_gtp.py::test_genmove_black_replays_legal PASSED               [ 48%]
+tests/test_gtp.py::test_genmove_white_replays_legal PASSED               [ 51%]
+tests/test_gtp.py::test_genmove_pass_when_terminal PASSED                [ 54%]
+tests/test_gtp.py::test_final_score_after_two_passes PASSED              [ 56%]
+tests/test_gtp.py::test_final_score_not_finished PASSED                  [ 59%]
+tests/test_gtp.py::test_kgs_time_settings_maps_to_budget PASSED          [ 62%]
+tests/test_gtp.py::test_kgs_time_settings_byo_branch PASSED              [ 64%]
+tests/test_gtp.py::test_kgs_time_settings_katago_clock_type_variant PASSED [ 67%]
+tests/test_gtp.py::test_time_left_stub PASSED                            [ 70%]
+tests/test_gtp.py::test_fixed_handicap_and_white_moves_first PASSED      [ 72%]
+tests/test_gtp.py::test_fixed_handicap_invalid PASSED                    [ 75%]
+tests/test_gtp.py::test_place_free_handicap PASSED                       [ 78%]
+tests/test_gtp.py::test_set_free_handicap PASSED                         [ 81%]
+tests/test_gtp.py::test_loadsgf PASSED                                   [ 83%]
+tests/test_gtp.py::test_printsgf PASSED                                  [ 86%]
+tests/test_gtp.py::test_quit PASSED                                      [ 89%]
+tests/test_gtp.py::test_unknown_command PASSED                           [ 91%]
+tests/test_gtp.py::test_kgs_chat_silent PASSED                           [ 94%]
+tests/test_gtp.py::test_malformed_input_does_not_crash PASSED            [ 97%]
+tests/test_gtp.py::test_subprocess_pipe_session PASSED                   [100%]
+
+============================= 37 passed in 3.54s ==============================
+
+================================================================================
+ACCEPTANCE 2: uv run pytest -q (255 prior + new)  -> exit 0
+================================================================================
+292 passed, 1 warning in 30.21s   (255 prior tests + 37 new todo-18 tests)
+
+================================================================================
+ACCEPTANCE 3: live KataGo GTP genmove alternation (todo-18 live integration)
+Command: uv run python <temp>/todo18_katago_check.py
+  katago:  tools/katago/eigen/katago.exe  (GTP mode, -model kata1-b10c128.txt.gz)
+  omigamax: python -m omigamax.cli.gtp_main --model models/best.pt --simulations 20
+  rules: kata-set-rules tromp-taylor; KataGo time-budget via kgs-time_settings
+         byoyomi 0 5 5 (KataGo 4-arg variant; omigamax accepts the GNU Go 3-arg
+         form per plan -- both covered by unit tests)
+--------------------------------------------------------------------------------
+TRANSCRIPT
+katago: E:\AAAhuancun\betamaster\tools\katago\eigen\katago.exe
+katago model: E:\AAAhuancun\betamaster\tools\katago\kata1-b10c128.txt.gz
+katago config: E:\AAAhuancun\betamaster\tools\katago\eigen\default_gtp.cfg
+[katago] protocol_version -> OK '2'
+[katago] name -> OK 'KataGo'
+[omigamax] protocol_version -> OK '2'
+[omigamax] name -> OK 'omigamax'
+[katago] kata-set-rules tromp-taylor -> OK ''
+[katago] kgs-time_settings byoyomi 0 5 5 -> OK ''
+[01] omigamax B -> F11  (peer play: OK)
+[02] katago W -> C4  (peer play: OK)
+[03] omigamax B -> D18  (peer play: OK)
+[04] katago W -> C16  (peer play: OK)
+[05] omigamax B -> C17  (peer play: OK)
+[06] katago W -> D16  (peer play: OK)
+[07] omigamax B -> J14  (peer play: OK)
+[08] katago W -> D17  (peer play: OK)
+[09] omigamax B -> H1  (peer play: OK)
+[10] katago W -> Q16  (peer play: OK)
+exchanged 10 plies in 15.4s
+[omigamax] final_score -> FAIL 'game not finished'
+[omigamax] printsgf -> OK 'E:\\AAAhuancun\\betamaster\\logs\\matches\\todo18\\gtp_vs_katago.sgf' (saved E:\AAAhuancun\betamaster\logs\matches\todo18\gtp_vs_katago.sgf)
+RESULT: PASS (genmove alternation completed, all moves legal)
+
+--------------------------------------------------------------------------------
+NOTE on "final_score -> FAIL 'game not finished'": this is the CORRECT GTP
+error behavior -- after 10 plies the game is not terminal (two consecutive
+passes), so the engine answers "? game not finished" (unit-tested). The live
+check's purpose is genmove alternation + legality, which passed for all 10 plies.
+SGF by-product: logs/matches/todo18/gtp_vs_katago.sgf (printsgf).
+================================================================================
+END task-18 evidence
