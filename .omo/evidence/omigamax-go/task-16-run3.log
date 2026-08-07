@@ -1,0 +1,20 @@
+uv : viz module unavailable (todo 17 not installed yet): No module named 'omigamax.viz.board_window' -- continuing in p
+ure-log mode
+所在位置 行:1 字符: 1
++ uv run python -m omigamax.train.loop --smoke --resume 2>&1 | Out-File ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (viz module unav...n pure-log mode:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+=== omigamax training loop (todo 16) ===
+device: cuda
+protocol: cycles=1 games/cycle=2 steps/cycle=25 sims/move=40 batch=32 eval_games=3 eval_sims=20 eval_interval=2000 seed=0 viz=module_unavailable
+resume: requested=True effective=True
+loop: 19 steps trained this run (global step 50, 1 cycles done, 4 games generated)
+loss: 6.4099 -> 9.1386 (decrease=False)
+eval gate 1 (step 50): 1/3 wins (win rate 0.333) elo=-20.597 -> KEEP best.pt
+checkpoints: latest=models\latest.pt exists=True | best=models\best.pt exists=True
+train log: logs\train.jsonl
+eval history: logs\eval_history.jsonl
+RESULT: PASS (exit 0)
+evidence written: .omo\evidence\omigamax-go\task-16-loop.json

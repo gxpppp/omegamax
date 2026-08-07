@@ -1,0 +1,104 @@
+omigamax-go todo 16: 训练循环编排 (training-loop orchestration) -- evidence
+date: 2026-08-07 14:58
+device: cuda (RTX 3060 6GB)  |  HEAD before: df98778 (todo 15)
+
+===================================================================
+ACCEPTANCE 1: pytest
+  command: uv run pytest -q
+  result: 239 passed in 23.73s (225 prior + 14 new in tests/test_loop.py), exit 0
+  evidence: task-16-pytest.txt
+
+===================================================================
+ACCEPTANCE 2: uv run python -m omigamax.train.loop --smoke (exit 0)
+-------------------------------------------------------------------
+uv : viz module unavailable (todo 17 not installed yet): No module named 'omigamax.viz.board_window' -- continuing in p
+ure-log mode
+所在位置 行:1 字符: 1
++ uv run python -m omigamax.train.loop --smoke 2>&1 | Out-File -FilePat ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (viz module unav...n pure-log mode:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+=== omigamax training loop (todo 16) ===
+device: cuda
+protocol: cycles=1 games/cycle=2 steps/cycle=25 sims/move=40 batch=32 eval_games=3 eval_sims=20 eval_interval=2000 seed=0 viz=module_unavailable
+resume: requested=False effective=False
+loop: 25 steps trained this run (global step 25, 1 cycles done, 2 games generated)
+loss: 7.7076 -> 6.5680 (decrease=True)
+eval gate 1 (step 25): 0/3 wins (win rate 0.000) elo=-16.000 -> KEEP best.pt
+checkpoints: latest=models\latest.pt exists=True | best=models\best.pt exists=True
+train log: logs\train.jsonl
+eval history: logs\eval_history.jsonl
+RESULT: PASS (exit 0)
+evidence written: .omo\evidence\omigamax-go\task-16-loop.json
+
+-------------------------------------------------------------------
+ACCEPTANCE 3: graceful interrupt -- uv run python -m omigamax.train.loop --smoke --resume --interrupt-at-steps 6 (exit 0)
+-------------------------------------------------------------------
+uv : viz module unavailable (todo 17 not installed yet): No module named 'omigamax.viz.board_window' -- continuing in p
+ure-log mode
+所在位置 行:1 字符: 1
++ uv run python -m omigamax.train.loop --smoke --resume --interrupt-at- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (viz module unav...n pure-log mode:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+interrupted: checkpoint saved at step 31 (models\latest.pt)
+=== omigamax training loop (todo 16) ===
+device: cuda
+protocol: cycles=1 games/cycle=2 steps/cycle=25 sims/move=40 batch=32 eval_games=3 eval_sims=20 eval_interval=2000 seed=0 viz=module_unavailable
+resume: requested=True effective=True
+loop: 6 steps trained this run (global step 31, 0 cycles done, 4 games generated)
+loop: INTERRUPTED -- checkpoint saved, logs flushed
+loss: 6.5894 -> 6.4870 (decrease=True)
+checkpoints: latest=models\latest.pt exists=True | best=models\best.pt exists=True
+train log: logs\train.jsonl
+eval history: logs\eval_history.jsonl
+RESULT: PASS (exit 0)
+evidence written: .omo\evidence\omigamax-go\task-16-loop.json
+
+-------------------------------------------------------------------
+ACCEPTANCE 4: resume continuity -- uv run python -m omigamax.train.loop --smoke --resume (exit 0)
+-------------------------------------------------------------------
+uv : viz module unavailable (todo 17 not installed yet): No module named 'omigamax.viz.board_window' -- continuing in p
+ure-log mode
+所在位置 行:1 字符: 1
++ uv run python -m omigamax.train.loop --smoke --resume 2>&1 | Out-File ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (viz module unav...n pure-log mode:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+=== omigamax training loop (todo 16) ===
+device: cuda
+protocol: cycles=1 games/cycle=2 steps/cycle=25 sims/move=40 batch=32 eval_games=3 eval_sims=20 eval_interval=2000 seed=0 viz=module_unavailable
+resume: requested=True effective=True
+loop: 19 steps trained this run (global step 50, 1 cycles done, 4 games generated)
+loss: 6.4099 -> 9.1386 (decrease=False)
+eval gate 1 (step 50): 1/3 wins (win rate 0.333) elo=-20.597 -> KEEP best.pt
+checkpoints: latest=models\latest.pt exists=True | best=models\best.pt exists=True
+train log: logs\train.jsonl
+eval history: logs\eval_history.jsonl
+RESULT: PASS (exit 0)
+evidence written: .omo\evidence\omigamax-go\task-16-loop.json
+
+===================================================================
+RESUME CONTINUITY VERIFICATION (from logs/train.jsonl)
+  50 train_step lines, steps 1..50 contiguous.
+  interrupted run last step: 31 | resumed run first step: 32  =>  32 > 31 PASS (plan: 新日志首步 > 旧末步)
+  loss across the boundary: 6.486961 (step 31) -> 6.409922 (step 32)  (no discontinuity)
+  checkpoint extra: games_generated=4, steps_into_cycle=0, cycles_completed=2
+
+EVAL GATES (logs/eval_history.jsonl, K=32 ELO):
+  step 25: candidate 0/3 wins (winrate 0.000) vs best.pt(step-320) -> KEEP best.pt, elo -> -16.0
+  step 50: candidate 1/3 wins (winrate 0.333) vs best.pt         -> KEEP best.pt, elo -16.0 -> -20.597
+  (both candidates too weak to pass the 0.55 gate; best.pt preserved at global_step 320)
+
+LAZY VIZ: config viz_enabled=true, omigamax.viz.board_window absent (todo 17)
+  -> warning logged 'viz module unavailable (todo 17 not installed yet) -- continuing in pure-log mode'; loop continues.
+
+PER-STEP LOG: logs/train.jsonl fields per train_step: event, timestamp, step, loss, lr, games, elo, cycle (>=20 lines with loss+elo: 50).
+
+NOTE: --smoke bounds game length (selfplay_max_moves=150, eval_max_moves=150) because weak 19x19 models can run games to 1000 moves (todo-13 measured 2.9 min/game); the bounded budgets keep the acceptance in minutes.
+
+RESULT: ALL ACCEPTANCE COMMANDS EXIT 0
+Evidence files: task-16-loop.txt, task-16-loop.json, task-16-pytest.txt, task-16-run1.log, task-16-run2.log, task-16-run3.log
