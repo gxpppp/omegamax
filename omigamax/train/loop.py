@@ -807,8 +807,20 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.evidence:
         path = Path(args.evidence)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # JSON-safe report for the evidence dump: the viz handle carries live
+        # queue/thread/stop objects that are NOT serializable and would crash
+        # the dump after a successful run (plan: viz must never break training).
+        def _json_safe(value):
+            if isinstance(value, dict):
+                return {k: _json_safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_json_safe(v) for v in value]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            return str(type(value).__name__)  # queue/thread/stop -> type name
+
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+            json.dump(_json_safe(report), f, ensure_ascii=False, indent=2)
         print(f"evidence written: {path}", flush=True)
 
     return 0
