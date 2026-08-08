@@ -1,0 +1,83 @@
+omigamax-go | P1: 批量下载围棋棋谱 (Bulk Go SGF download)
+Date: 2026-08-08
+Host: Windows 10, PowerShell 5.1, Python 3.12.10
+Git: C:\Program Files\Git\cmd\git.exe | uv: C:\Users\Administrator\.local\bin\uv.exe
+
+================================================================
+SOURCES
+================================================================
+1. CWI Japanese pro archive (homepages.cwi.nl/~aeb/go/games/)
+   - games.7z (28MB): SKIPPED — no 7-Zip installed (checked
+     "C:\Program Files\7-Zip\7z.exe" and PATH, absent).
+   - Fallback: games.tgz (46,205,456 bytes) downloaded via curl.exe
+     --retry 3 --retry-delay 5, extracted with bsdtar (tar -xzf).
+2. u-go.net KGS 7d+ archives (dl.u-go.net/gamerecords/)
+   - Index: https://www.u-go.net/gamerecords/ (2001-2015 yearly,
+     2016_01..2019_04 monthly).
+   - 165 archive links found (55 periods x 3 formats: .zip/.tar.gz/.tar.bz2).
+   - Downloaded ALL archive types listed on the page (per task instruction).
+   - JGDB: NOT downloaded (out of scope per plan).
+
+================================================================
+PER-SOURCE TABLE
+================================================================
+SOURCE   | ARCHIVES  | ARCHIVES | SGF COUNT  | DISK SIZE
+         | LISTED    | FAILED   |            |
+---------|-----------|----------|------------|-----------
+CWI      | 1 (tgz)   | 0        |   96,054   | 186.3 MB
+KGS zip  | 55        | 0        |  228,849   | (see KGS total)
+KGS tar.gz | 55      | 0        |  228,849   | (see KGS total)
+KGS tar.bz2 | 55     | 0        |  228,849   | (see KGS total)
+KGS all  | 165       | 0        |  228,849 unique | 1,270.6 MB (all formats + archives)
+
+TOTAL SGF files (all extracted copies): 96,054 + 3*228,849 = 782,601
+UNIQUE games: 96,054 (CWI) + 228,849 (KGS) = 324,903
+
+Note: KGS .zip / .tar.gz / .tar.bz2 contain identical games (same
+content, 3 compression formats) — deduplicated count = 228,849.
+
+================================================================
+FAILURES
+================================================================
+CWI: 0 download failures, 0 extract failures.
+KGS: 0 download failures, 0 extract failures.
+KGS .tar.bz2 extraction initially failed via Windows bsdtar
+("Can't initialize filter; unable to run program bzip2 -d" — no bzip2
+binary on PATH); completed instead with Python 3.12 tarfile (built-in
+bz2 codec), filter='data'. Verified: all 55 bz2 archives extracted,
+0 errors.
+
+================================================================
+SAMPLE PARSE VERIFICATION (5 random SGFs per source, seed=42)
+================================================================
+CWI (total 96,054):
+  001.sgf : starts_with_semicolon=True inferred_board=19
+  P01.sgf : starts_with_semicolon=True inferred_board=19
+  P02.sgf : starts_with_semicolon=True inferred_board=19
+  L10.sgf : starts_with_semicolon=True inferred_board=19
+  Q32.sgf : starts_with_semicolon=True inferred_board=19
+  Note: CWI files omit the SZ[] property (SGF default = 19x19);
+  board size inferred from max move coordinate (19/19 samples).
+
+KGS-zip (total 228,849):
+  2018-01-27-73.sgf : starts_with_semicolon=True inferred_board=19
+  2008-07-12-2.sgf  : starts_with_semicolon=True inferred_board=19
+  2006-08-13-11.sgf : starts_with_semicolon=True inferred_board=19
+  2002-10-14-7.sgf  : starts_with_semicolon=True inferred_board=19
+  2010-12-26-42.sgf : starts_with_semicolon=True inferred_board=19
+
+KGS-targz (total 228,849): same 5 sample files, all parse OK (19x19).
+KGS-tarbz2 (total 228,849): same 5 sample files, all parse OK (19x19).
+
+Full-scan SZ[19] presence (KGS-zip): 228,849 / 228,849 files contain SZ[19].
+Full-scan (CWI): 1,197 files carry explicit SZ[19] in first 2KB; rest rely
+on SGF 19x19 default (verified via move-coordinate inference on samples).
+
+================================================================
+DELIVERABLE ARTIFACTS
+================================================================
+- Script: scripts/fetch_kgs_archives.py (href parse + download + retry + resume)
+- Verify: scripts/verify_sgf_corpus.py
+- Data: data/games/cwi/ (96,054 sgf) ; data/games/kgs/{zip,targz,tarbz2} (228,849 each)
+- Archives kept: data/games/kgs/archives/*.zip|.tar.gz|.tar.bz2 (165 files)
+- Git ignore check: `git check-ignore data/games` -> data/games (confirmed)
