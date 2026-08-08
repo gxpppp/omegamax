@@ -49,6 +49,10 @@ Per the plan (todo 16, authoritative) and AGZ (Nature 550, 2017, Methods fig. 1)
   starts (window pops up within seconds of launch), and self-play now
   generates one game at a time with a frame pushed after EACH game, so the
   user watches each game finish instead of waiting for the whole batch.
+  F3d sharpens this to REAL-TIME: ``generate_games`` receives a
+  ``frame_callback`` that streams a Snapshot built directly from the LIVE
+  board after EVERY move (each stone / pass placement), so the window
+  refreshes every ~1-2 s during self-play instead of only when a game ends.
 
 Single-process self-play only (plan Must-NOT: no multiprocessing yet).
 
@@ -264,6 +268,45 @@ def build_viz_snapshot(board_info, *, komi, games, train_step, loss, elo,
         board_size=int(board_info["board_size"]),
         move_number=int(board_info["move_number"]),
         current_player=int(board_info["current_player"]),
+        win_rate=win_rate,
+        last_move=last_move,
+        komi=float(komi),
+        games=int(games) if games is not None else None,
+        train_step=int(train_step) if train_step is not None else None,
+        loss=float(loss) if loss is not None else None,
+        elo=float(elo) if elo is not None else None,
+    )
+
+
+def viz_snapshot_from_board(board, board_size, move_number, current_player,
+                            last_move, *, komi, games, train_step, loss, elo,
+                            win_rate=None):
+    """A viz ``Snapshot`` built directly from a LIVE rules ``Board`` (F3d).
+
+    Unlike ``viz_board_info`` + :func:`build_viz_snapshot` (which read the
+    newest npz and therefore only exist at game end), this builds the frame
+    straight from the in-memory ``Board`` right after a move, so the window
+    can stream EVERY move during self-play in real time. ``board`` is a live
+    ``omigamax.rules.board.Board``; ``move_number`` is the 1-based count of
+    moves just played; ``current_player`` is the side to move next; and
+    ``last_move`` is the ``(row, col)`` of the most recent stone (``None``
+    for a pass). Lazy-imports the viz module so a missing pygame can never
+    raise here; returns ``None`` when the module is absent -- the trainer
+    never depends on viz. O(board_size^2) list copy + dataclass construction
+    only: sub-millisecond, no encoding/render work in the trainer thread.
+    """
+    try:
+        from omigamax.viz.board_window import Snapshot
+    except Exception:  # noqa: BLE001 - viz must never break the loop
+        return None
+    n = int(board_size)
+    flat = board.state
+    grid = [list(flat[r * n:(r + 1) * n]) for r in range(n)]
+    return Snapshot(
+        board=grid,
+        board_size=n,
+        move_number=int(move_number),
+        current_player=int(current_player),
         win_rate=win_rate,
         last_move=last_move,
         komi=float(komi),
@@ -656,6 +699,34 @@ def run_loop(
                         games_generated=games_generated,
                         steps_into_cycle=steps_into_cycle)
 
+    def _per_move_frame(board, move_number, color) -> None:
+        """F3d: stream EVERY self-play move to the live window in real time.
+
+        Passed as ``frame_callback`` to :func:`generate_games`, which invokes
+        it with the live rules ``Board`` right after each stone / pass
+        placement. The Snapshot is built directly from that LIVE board (a new
+        helper :func:`viz_snapshot_from_board` -- the npz only exists at game
+        end, so per-move frames cannot use the npz path) and pushed through
+        the existing non-blocking queue. Started-guarded + try/except-wrapped:
+        viz can never slow or crash training. Cost is one ``board.state`` list
+        copy + a dataclass construction + a bounded-queue ``put_nowait`` --
+        sub-millisecond, no encoding/render work in the trainer thread.
+        """
+        if not viz.get("started"):
+            return
+        next_player = BLACK if len(board.moves) % 2 == 0 else WHITE
+        last_move = None
+        if board.moves:
+            mv, _ = board.moves[-1]
+            if mv is not None:
+                last_move = (int(mv[0]), int(mv[1]))
+        snap = viz_snapshot_from_board(
+            board, board_size, int(move_number), next_player, last_move,
+            komi=float(cfg.get("komi", 7.5)), games=games_generated,
+            train_step=None, loss=None, elo=current_elo)
+        if snap is not None:
+            push_viz_frame(viz, snap)
+
     try:
         while cycles_done < cycles and (
             remaining_budget is None or remaining_budget > 0
@@ -677,7 +748,8 @@ def run_loop(
                     r, _records = generate_games(
                         model, cfg, games=1, data_dir=data_dir,
                         keep=keep_games, seed=int(seed) + games_generated,
-                        simulations=simulations, max_moves=selfplay_max_moves)
+                        simulations=simulations, max_moves=selfplay_max_moves,
+                        frame_callback=_per_move_frame)
                     games_generated += 1
                     buffer.refresh()
                     if viz.get("started"):
@@ -712,7 +784,8 @@ def run_loop(
                             model, cfg, games=1, data_dir=data_dir,
                             keep=keep_games, seed=int(seed) + games_generated,
                             simulations=simulations,
-                            max_moves=selfplay_max_moves)
+                            max_moves=selfplay_max_moves,
+                            frame_callback=_per_move_frame)
                         games_generated += 1
                         buffer.refresh()
                         if viz.get("started"):

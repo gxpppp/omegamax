@@ -218,24 +218,26 @@ class TestVizFeed:
             cycles=1, games_per_cycle=2, steps_per_cycle=5,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        # 1 opening frame (F3c) + 2 per-game frames (F3c) + one frame per
-        # train step (F2)
-        assert len(queue) == 8
+        # >= 1 opening frame (F3c) + >= 2 per-game frames (F3c) + one frame
+        # per train step (F2) -- fake_generate_games pushes no per-move frames
+        # (F3d), so the counts above are lower bounds, not exact totals
+        assert len(queue) >= 8
         snaps = []
         while True:
             s = queue.poll(timeout=0.01)
             if s is None:
                 break
             snaps.append(s)
-        assert len(snaps) == 8
+        assert len(snaps) >= 8
         # oldest frame: the opening empty-board frame (no games, no metrics)
         assert snaps[0].train_step is None
         assert snaps[0].loss is None
         assert snaps[0].games == 0
         assert all(v == 0 for row in snaps[0].board for v in row)
-        # next: per-game self-play frames (board present, no train step yet)
-        assert snaps[1].games == 1 and snaps[1].train_step is None
-        assert snaps[2].games == 2 and snaps[2].train_step is None
+        # per-game self-play frames (board present, no train step yet)
+        g1 = next(s for s in snaps if s.games == 1)
+        g2 = next(s for s in snaps if s.games == 2)
+        assert g1.train_step is None and g2.train_step is None
         # newest frame carries the last train step's live metrics
         last = snaps[-1]
         assert last.train_step >= 1
@@ -277,9 +279,11 @@ class TestVizFeed:
             cycles=1, games_per_cycle=2, steps_per_cycle=5,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        # by the time the FIRST training step runs, 3 frames were already
+        # by the time the FIRST training step runs, >= 3 frames were already
         # enqueued: the opening empty board + one per finished game
-        assert qsize_at_first_step["qsize"] == 3
+        # (fake_generate_games streams no per-move frames, so this is a lower
+        # bound rather than an exact count)
+        assert qsize_at_first_step["qsize"] >= 3
 
     def test_opening_frame_pushed_immediately(self, tmp_path, monkeypatch):
         """F3c: the opening empty-board frame is pushed right after the viz
@@ -375,6 +379,64 @@ class TestVizFeed:
         game_frame = next(s for s in snaps if s.games == 1)
         assert game_frame.train_step is None
         assert game_frame.board is not None
+
+    def test_per_move_frames_during_selfplay(self, tmp_path, monkeypatch):
+        """F3d: with viz on, the queue receives a frame for EVERY move of a
+        game -- >= 2 frames with strictly increasing move_number arrive
+        BEFORE the game ends (livestream, not just per-finished-game)."""
+        from omigamax.viz.board_window import SnapshotQueue
+
+        queue = SnapshotQueue(maxlen=64)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+
+        def fake_gen_with_moves(network, cfg, games, data_dir, keep, seed,
+                                simulations, frame_callback=None, **kwargs):
+            # mimic one real game: 3 live moves streamed via the frame
+            # callback (a fresh board each), then the synthetic npz lands
+            from omigamax.rules import BLACK, WHITE, Board
+            board = Board(cfg["board_size"])
+            for i in range(3):
+                color = BLACK if len(board.moves) % 2 == 0 else WHITE
+                board.play((i, 0), color)
+                if frame_callback is not None:
+                    frame_callback(board, len(board.moves), color)
+            write_synthetic_games(data_dir, games, int(seed),
+                                  size=cfg["board_size"])
+            return {"games": int(games), "sims_per_sec": 0.0}, []
+
+        monkeypatch.setattr(loop, "generate_games", fake_gen_with_moves)
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": queue, "thread": None, "stop": lambda: None,
+            },
+        )
+        loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=1, steps_per_cycle=1,
+            batch_size=8, use_symmetry=False, seed=0,
+        )
+        snaps = []
+        while True:
+            s = queue.poll(timeout=0.01)
+            if s is None:
+                break
+            snaps.append(s)
+        # FIFO order: opening empty board (move 0), then the 3 per-move live
+        # frames (moves 1, 2, 3) before the game-end / train-step frames
+        assert snaps[0].move_number == 0
+        assert snaps[0].board and all(v == 0 for row in snaps[0].board for v in row)
+        per_move = [s for s in snaps if s.move_number in (1, 2, 3)]
+        assert [s.move_number for s in per_move] == [1, 2, 3]
+        # consecutive frames carry the live board of the move just played
+        assert per_move[0].board[0][0] == 1  # black stone on (0,0) after move 1
+        assert per_move[1].board[1][0] == 2  # white stone on (1,0) after move 2
+        assert per_move[2].board[2][0] == 1  # black stone on (2,0) after move 3
+        assert per_move[0].train_step is None  # still in the self-play phase
 
     def test_push_failure_never_crashes_training(self, tmp_path, monkeypatch):
         """A broken queue must not abort the training loop."""

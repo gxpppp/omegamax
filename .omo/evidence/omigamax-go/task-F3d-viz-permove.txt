@@ -1,0 +1,26 @@
+........................................................................ [ 16%]
+........................................................................ [ 32%]
+........................................................................ [ 49%]
+........................................................................ [ 65%]
+........................................................................ [ 82%]
+........................................................................ [ 98%]
+......                                                                   [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\pygame\pkgdata.py:25
+  E:\AAAhuancun\betamaster\.venv\Lib\site-packages\pygame\pkgdata.py:25: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import resource_stream, resource_exists
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+438 passed, 1 warning in 40.91s
+pygame 2.6.1 (SDL 2.28.4, Python 3.12.10)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+=== F3d headless live proof (SDL_VIDEODRIVER=dummy) ===
+protocol: 1 game, sims=15, max_moves=30, board=9x9, device=cpu, seed=0
+games_generated: 1
+game moves (npz features T): 30
+frames pushed to queue: total=33
+  opening frame (move 0): 1
+  per-move frames (1..N strictly increasing): 30
+  consecutive run 0..N: 31 (== moves+1)  monotonic=True
+frame move_number stream: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 30, 30]
+PASS: per-move frames arrive for every move, move_number strictly increasing 0..N

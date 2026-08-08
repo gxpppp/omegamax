@@ -438,6 +438,76 @@ class TestResign:
 
 
 # ---------------------------------------------------------------------------
+# frame_callback: one call per move with the LIVE board (F3d)
+# ---------------------------------------------------------------------------
+
+class TestFrameCallback:
+    def test_called_once_per_move_with_live_board(self, net, cfg):
+        """The callback fires once per move with the live board right after
+        that move: call count == move count, move_number monotonic 1..T,
+        color is the mover, and each board equals the state just played."""
+        calls: list = []
+
+        def cb(board, move_number, color):
+            calls.append((move_number, color, board.state))
+
+        rec = sp.play_game(
+            net, cfg, size=SIZE, simulations=10, seed=11, dirichlet_alpha=0.0,
+            frame_callback=cb,
+        )
+        assert rec["move_count"] > 0
+        assert len(calls) == rec["move_count"]
+        board = Board(SIZE)
+        for i, (move_number, color, state) in enumerate(calls):
+            assert move_number == i + 1  # 1-based, strictly monotonic
+            mover = BLACK if i % 2 == 0 else WHITE
+            assert color == mover  # the color that just played
+            # apply move i and compare with the live board the callback saw
+            a = rec["move_actions"][i]
+            if a == pass_index(SIZE):
+                board.pass_move(mover)
+            else:
+                board.play((a // SIZE, a % SIZE), mover)
+            assert state == board.state, f"live board mismatch at move {i + 1}"
+        # the last callback's board is the terminal position
+        assert calls[-1][2] == board.state
+
+    def test_generate_games_forwards_frame_callback(self, net, cfg, tmp_path):
+        """``generate_games`` forwards ``frame_callback`` to every game."""
+        data_dir = tmp_path / "data"
+        seen: list[int] = []
+
+        def cb(board, move_number, color):
+            seen.append(move_number)
+
+        report, records = sp.generate_games(
+            net, cfg, games=1, data_dir=data_dir, keep=1, seed=0,
+            size=SIZE, simulations=8, dirichlet_alpha=0.0,
+            frame_callback=cb,
+        )
+        assert len(records) == 1
+        t = records[0]["move_count"]
+        assert len(seen) == t
+        assert seen == list(range(1, t + 1))  # monotonic across the game
+
+    def test_raising_callback_never_breaks_generation(self, net, cfg):
+        """A crashing callback is swallowed; the game still completes."""
+        calls = {"n": 0}
+
+        def boom(board, move_number, color):
+            calls["n"] += 1
+            raise RuntimeError("viz exploded")
+
+        rec = sp.play_game(
+            net, cfg, size=SIZE, simulations=10, seed=13, dirichlet_alpha=0.0,
+            frame_callback=boom,
+        )
+        assert calls["n"] == rec["move_count"] > 0
+        assert rec["winner"] in ("B", "W")
+        assert rec["features"].shape[0] == rec["move_count"]
+
+
+# ---------------------------------------------------------------------------
 # CLI smoke
 # ---------------------------------------------------------------------------
 

@@ -134,6 +134,7 @@ def play_game(
     max_moves: "int | None" = None,
     seed: "int | None" = None,
     evaluator=None,
+    frame_callback=None,
 ) -> dict:
     """Play one full self-play game with ``network`` on both sides.
 
@@ -158,6 +159,13 @@ def play_game(
         seed: numpy seed for the game's RNG (noise + move sampling).
         evaluator: optional leaf evaluator (default
             :class:`BatchedNetworkEvaluator` built over ``network``).
+        frame_callback: optional ``frame_callback(board, move_number, color)``
+            invoked AFTER EVERY move (each stone / pass placement) with the
+            LIVE rules ``Board`` right after that move, the 1-based
+            ``move_number`` just played, and the ``color`` that played it.
+            Callbacks run before the next search and are wrapped in
+            try/except, so a failing callback can never break generation.
+            ``None`` (default) keeps the generator exactly as before.
 
     Returns a game record dict:
 
@@ -253,6 +261,16 @@ def play_game(
             board.play((action // size, action % size), color)
         state_history.append(board.state)
         move_number += 1
+        # F3d: stream the LIVE board to the visualization after EVERY move (a
+        # stone or a pass) so the window refreshes every ~1-2 s instead of once
+        # per finished game. The callback gets the live Board + the 1-based
+        # move count + the color just played; it is fully try/except-guarded so
+        # a failing callback can never break generation.
+        if frame_callback is not None:
+            try:
+                frame_callback(board, move_number, color)
+            except Exception:  # noqa: BLE001 - viz must never break self-play
+                pass
 
     if resigned:
         resigning_color = BLACK if len(board.moves) % 2 == 0 else WHITE
@@ -352,6 +370,7 @@ def generate_games(
     data_dir: "str | Path" = DEFAULT_DATA_DIR,
     keep: "int | None" = None,
     seed: int = 0,
+    frame_callback=None,
     **play_kwargs,
 ) -> tuple[dict, list[dict]]:
     """Generate ``games`` self-play games, save one npz per game, prune.
@@ -361,6 +380,10 @@ def generate_games(
     (``sims_per_sec`` = total search simulations / wall-clock seconds,
     positions/s, games/hour), the data directory, pruning results and the
     npz files present afterwards.
+
+    ``frame_callback`` (optional) is forwarded to :func:`play_game`: it is
+    invoked with the live board after EVERY move of every game (see
+    :func:`play_game`). ``None`` (default) keeps behavior identical.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -368,7 +391,9 @@ def generate_games(
     t0 = time.perf_counter()
     records: list[dict] = []
     for g in range(int(games)):
-        rec = play_game(network, cfg, seed=seed + g, **play_kwargs)
+        rec = play_game(
+            network, cfg, seed=seed + g, frame_callback=frame_callback,
+            **play_kwargs)
         rec["npz"] = save_game_npz(rec, data_dir / f"game_{rec['seed']:010d}.npz")
         records.append(rec)
     wall = time.perf_counter() - t0
