@@ -7,18 +7,28 @@ touch ``config/default.yaml``) on ``data/pretrain/chunk_*.npz`` SL samples
 
     L = policy_ce(logits, onehot(pi)) + value_mse(tanh_value, z)
 
-SGD momentum 0.9, L2 1e-4, grad-norm clip 1.0, ``--lr`` 0.02 (deliberately
-10x below the RL 0.2 -- see :mod:`omigamax.train.pretrain` for the warm-start
-justification) with an optional piecewise-halving schedule. Checkpoints are
-written in the existing ``omigamax/train/train.py`` format (arch + optimizer +
-global_step + rng_state) to ``models/pretrain.pt``; ``--resume`` continues.
+    SGD momentum 0.9, L2 1e-4, grad-norm clip 1.0, ``--lr`` 0.02 (deliberately
+    10x below the RL 0.2 -- see :mod:`omigamax.train.pretrain` for the warm-start
+    justification) with an optional piecewise-halving schedule. Checkpoints are
+    written in the existing ``omigamax/train/train.py`` format (arch + optimizer +
+    global_step + rng_state) to ``models/pretrain.pt``; ``--resume`` continues.
+
+Long runs are chunked with ``--save-every N`` (default 5000): ``run_pretrain``
+is called in blocks of ``N`` steps and a checkpoint is written after each
+block, so a machine restart at most loses the tail of the current block. The
+final checkpoint is always written at the end (same path/content as without
+``--save-every``). ``--resume`` picks up the last periodic checkpoint via its
+``global_step``.
 
 Per-step metrics (loss components, top-1 policy accuracy vs the human move,
-lr) are JSONL-logged to ``logs/pretrain.jsonl``.
+lr) are JSONL-logged to ``logs/pretrain.jsonl``. ``run_pretrain`` appends to
+the log (opening/closing its own handle per call), and because the log
+condition keys off the monotonic ``global_step`` each step value is logged at
+most once across blocks -- chunking never duplicates a step line.
 
 Usage:
     uv run python -m omigamax.cli.pretrain [--steps 200] [--batch-size 64]
-        [--lr 0.02] [--blocks 20] [--channels 256] [--resume]
+        [--lr 0.02] [--blocks 20] [--channels 256] [--save-every 5000] [--resume]
 """
 
 from __future__ import annotations
@@ -86,6 +96,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="JSONL per-step metric log (default logs/pretrain.jsonl)")
     ap.add_argument("--log-every", type=int, default=10,
                     help="log a JSONL line every N steps (default 10)")
+    ap.add_argument("--save-every", type=int, default=5000,
+                    help="write a checkpoint every N steps (default 5000; the "
+                         "final checkpoint is always written at the end)")
     return ap
 
 
@@ -123,21 +136,14 @@ def main(argv: "list[str] | None" = None) -> int:
         global_step = resume_from_checkpoint(ckpt, model, optimizer, rng)
         resumed = {"step": global_step, "arch": arch}
 
+    if args.save_every <= 0:
+        raise SystemExit("ERROR: --save-every must be > 0")
+
     with PretrainChunks(args.data_dir) as chunks:
         report = chunks.validate()
         t0 = time.perf_counter()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        metrics, final_step, rng = run_pretrain(
-            model, optimizer, chunks, steps=args.steps, rng=rng,
-            seed=args.seed, global_step=global_step, batch_size=args.batch_size,
-            device=device, grad_clip=args.grad_clip, lr_base=args.lr,
-            lr_steps=tuple(args.lr_steps) if args.lr_steps else (),
-            log_path=args.log_path, log_every=args.log_every,
-        )
-        wall = time.perf_counter() - t0
-        peak_gb = (torch.cuda.max_memory_allocated() / GIB
-                   if torch.cuda.is_available() else 0.0)
 
         config = {
             "blocks": args.blocks, "channels": args.channels,
@@ -146,12 +152,43 @@ def main(argv: "list[str] | None" = None) -> int:
             "grad_clip": args.grad_clip, "lr_steps": list(args.lr_steps),
             "batch_size": args.batch_size, "seed": args.seed,
         }
-        save_pretrain_checkpoint(
-            ckpt_path, model, optimizer, global_step=final_step, rng=rng,
-            config=config,
-            extra={"total_positions": report["total_positions"],
-                   "resumed": resumed},
-        )
+        extra = {"total_positions": report["total_positions"],
+                 "resumed": resumed}
+
+        def _save(step: int, rng_: "np.random.Generator") -> None:
+            save_pretrain_checkpoint(
+                ckpt_path, model, optimizer, global_step=step, rng=rng_,
+                config=config, extra=extra,
+            )
+
+        # Run in --save-every blocks. run_pretrain appends to log_path with
+        # its own file handle per call; the log condition keys off the
+        # monotonic global_step, so no step line is ever duplicated across
+        # blocks. Each completed block (except the last) writes a checkpoint
+        # that --resume can pick up after a machine restart.
+        metrics: list[dict] = []
+        steps_left = int(args.steps)
+        while steps_left > 0:
+            chunk = min(int(args.save_every), steps_left)
+            m, global_step, rng = run_pretrain(
+                model, optimizer, chunks, steps=chunk, rng=rng,
+                seed=args.seed, global_step=global_step, batch_size=args.batch_size,
+                device=device, grad_clip=args.grad_clip, lr_base=args.lr,
+                lr_steps=tuple(args.lr_steps) if args.lr_steps else (),
+                log_path=args.log_path, log_every=args.log_every,
+            )
+            metrics.extend(m)
+            steps_left -= chunk
+            if steps_left > 0:
+                _save(global_step, rng)
+                print(f"[save] step={global_step} checkpoint={ckpt_path}")
+        final_step = int(global_step)
+
+        wall = time.perf_counter() - t0
+        peak_gb = (torch.cuda.max_memory_allocated() / GIB
+                   if torch.cuda.is_available() else 0.0)
+
+        _save(final_step, rng)
 
     ms_per_step = wall / max(1, len(metrics)) * 1e3
     first = metrics[0] if metrics else {}
