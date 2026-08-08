@@ -1,0 +1,176 @@
+P3 棋谱→预训练样本转换（convert_corpus.py）运行报告
+========================================================================
+清单        : data/games/manifest_clean.jsonl
+清单总局数  : 228,335
+采样策略    : 分层——CWI 职业棋谱优先（质量最高），KGS 补齐（komi/风格多样性）；全量 CWI(88,348 局 ≈ 108GB) 超出 50GB 磁盘硬上限，故取 20k CWI + 5k KGS 的最强质量配比
+采样种子    : 42
+目标局数    : 25,000（实际选择 25,000）
+来源分布    : {'cwi': 20000, 'kgs': 5000}
+
+成功转换局  : 24,856
+生成样本数  : 5,122,072（≈ 31.4 GB）
+跳过局数    : 144
+  - illegal_move: illegal move (18, 18) for color 2: 5
+  - illegal_move: illegal move (6, 18) for color 2: 3
+  - illegal_move: illegal move (8, 11) for color 1: 2
+  - illegal_move: illegal move (9, 2) for color 2: 2
+  - illegal_move: illegal move (9, 4) for color 1: 2
+  - illegal_move: illegal move (0, 18) for color 1: 2
+  - illegal_move: illegal move (18, 18) for color 1: 2
+  - illegal_move: illegal move (4, 4) for color 1: 2
+  - illegal_move: illegal move (16, 4) for color 1: 2
+  - illegal_move: illegal move (3, 0) for color 2: 2
+  - illegal_move: illegal move (13, 15) for color 2: 2
+  - illegal_move: illegal move (5, 5) for color 1: 2
+  - illegal_move: illegal move (15, 14) for color 1: 2
+  - illegal_move: illegal move (4, 2) for color 2: 2
+  - illegal_move: illegal move (2, 6) for color 2: 2
+  - illegal_move: illegal move (7, 3) for color 2: 2
+  - illegal_move: illegal move (10, 14) for color 2: 2
+  - illegal_move: illegal move (9, 18) for color 1: 2
+  - illegal_move: illegal move (2, 5) for color 2: 2
+  - illegal_move: illegal move (14, 2) for color 1: 1
+  - illegal_move: illegal move (2, 13) for color 2: 1
+  - illegal_move: illegal move (14, 7) for color 1: 1
+  - illegal_move: illegal move (7, 14) for color 1: 1
+  - illegal_move: illegal move (14, 9) for color 2: 1
+  - illegal_move: illegal move (7, 9) for color 2: 1
+  - illegal_move: illegal move (15, 6) for color 2: 1
+  - illegal_move: illegal move (11, 4) for color 1: 1
+  - illegal_move: illegal move (15, 8) for color 1: 1
+  - illegal_move: illegal move (14, 8) for color 1: 1
+  - illegal_move: illegal move (4, 5) for color 1: 1
+  - illegal_move: illegal move (4, 10) for color 1: 1
+  - illegal_move: illegal move (5, 6) for color 2: 1
+  - illegal_move: illegal move (10, 6) for color 1: 1
+  - illegal_move: illegal move (15, 10) for color 2: 1
+  - illegal_move: illegal move (0, 8) for color 1: 1
+  - illegal_move: illegal move (5, 6) for color 1: 1
+  - illegal_move: illegal move (10, 10) for color 2: 1
+  - illegal_move: illegal move (3, 11) for color 1: 1
+  - illegal_move: illegal move (3, 7) for color 2: 1
+  - illegal_move: illegal move (14, 11) for color 1: 1
+  - illegal_move: illegal move (16, 11) for color 1: 1
+  - illegal_move: illegal move (9, 5) for color 1: 1
+  - illegal_move: illegal move (11, 3) for color 1: 1
+  - illegal_move: illegal move (2, 7) for color 2: 1
+  - illegal_move: illegal move (11, 16) for color 2: 1
+  - illegal_move: illegal move (4, 8) for color 1: 1
+  - illegal_move: illegal move (12, 5) for color 1: 1
+  - illegal_move: illegal move (15, 17) for color 2: 1
+  - illegal_move: illegal move (13, 0) for color 2: 1
+  - illegal_move: illegal move (4, 7) for color 2: 1
+  - illegal_move: illegal move (13, 12) for color 1: 1
+  - illegal_move: illegal move (9, 3) for color 2: 1
+  - illegal_move: illegal move (6, 15) for color 1: 1
+  - illegal_move: illegal move (18, 12) for color 2: 1
+  - illegal_move: illegal move (4, 11) for color 2: 1
+  - illegal_move: illegal move (3, 14) for color 2: 1
+  - illegal_move: illegal move (15, 5) for color 2: 1
+  - illegal_move: illegal move (0, 15) for color 2: 1
+  - illegal_move: illegal move (7, 13) for color 1: 1
+  - illegal_move: illegal move (0, 8) for color 2: 1
+  - illegal_move: illegal move (11, 14) for color 1: 1
+  - illegal_move: illegal move (18, 10) for color 2: 1
+  - illegal_move: illegal move (13, 8) for color 1: 1
+  - illegal_move: illegal move (0, 11) for color 1: 1
+  - illegal_move: illegal move (18, 6) for color 1: 1
+  - illegal_move: illegal move (13, 0) for color 1: 1
+  - illegal_move: illegal move (5, 11) for color 2: 1
+  - illegal_move: illegal move (4, 0) for color 1: 1
+  - illegal_move: illegal move (15, 16) for color 2: 1
+  - illegal_move: illegal move (10, 9) for color 2: 1
+  - illegal_move: illegal move (10, 7) for color 2: 1
+  - illegal_move: illegal move (9, 13) for color 1: 1
+  - illegal_move: illegal move (14, 2) for color 2: 1
+  - illegal_move: illegal move (15, 13) for color 1: 1
+  - illegal_move: illegal move (14, 18) for color 1: 1
+  - illegal_move: illegal move (0, 6) for color 2: 1
+  - illegal_move: illegal move (18, 17) for color 1: 1
+  - illegal_move: illegal move (3, 7) for color 1: 1
+  - illegal_move: illegal move (9, 0) for color 2: 1
+  - illegal_move: illegal move (7, 7) for color 2: 1
+  - illegal_move: illegal move (17, 3) for color 1: 1
+  - illegal_move: illegal move (18, 14) for color 1: 1
+  - illegal_move: illegal move (10, 3) for color 2: 1
+  - illegal_move: illegal move (15, 6) for color 1: 1
+  - illegal_move: illegal move (9, 10) for color 1: 1
+  - illegal_move: illegal move (1, 0) for color 2: 1
+  - illegal_move: illegal move (3, 18) for color 1: 1
+  - illegal_move: illegal move (0, 11) for color 2: 1
+  - illegal_move: illegal move (14, 12) for color 1: 1
+  - illegal_move: illegal move (7, 6) for color 1: 1
+  - illegal_move: illegal move (4, 14) for color 1: 1
+  - illegal_move: illegal move (16, 5) for color 2: 1
+  - illegal_move: illegal move (1, 13) for color 1: 1
+  - illegal_move: illegal move (4, 13) for color 1: 1
+  - illegal_move: illegal move (16, 13) for color 2: 1
+  - illegal_move: illegal move (0, 12) for color 1: 1
+  - illegal_move: illegal move (8, 3) for color 1: 1
+  - illegal_move: illegal move (9, 8) for color 2: 1
+  - illegal_move: illegal move (14, 7) for color 2: 1
+  - illegal_move: illegal move (12, 6) for color 1: 1
+  - illegal_move: illegal move (0, 14) for color 2: 1
+  - illegal_move: illegal move (0, 10) for color 1: 1
+  - illegal_move: illegal move (14, 13) for color 2: 1
+  - illegal_move: illegal move (12, 18) for color 2: 1
+  - illegal_move: illegal move (14, 17) for color 2: 1
+  - illegal_move: illegal move (9, 12) for color 2: 1
+  - illegal_move: illegal move (4, 12) for color 1: 1
+  - illegal_move: illegal move (7, 18) for color 2: 1
+  - illegal_move: illegal move (4, 9) for color 2: 1
+  - illegal_move: illegal move (7, 8) for color 1: 1
+  - illegal_move: illegal move (14, 15) for color 2: 1
+  - illegal_move: illegal move (1, 15) for color 2: 1
+  - illegal_move: illegal move (11, 10) for color 1: 1
+  - illegal_move: illegal move (17, 0) for color 2: 1
+  - illegal_move: illegal move (6, 14) for color 2: 1
+  - illegal_move: illegal move (12, 6) for color 2: 1
+  - illegal_move: illegal move (1, 2) for color 2: 1
+  - illegal_move: illegal move (5, 9) for color 2: 1
+  - illegal_move: illegal move (3, 13) for color 2: 1
+  - illegal_move: illegal move (11, 15) for color 1: 1
+  - illegal_move: illegal move (4, 8) for color 2: 1
+
+分块文件：
+  chunk_0000.npz: 局数 2,000 / 样本 412,940 / 2535.5 MB
+  chunk_0001.npz: 局数 2,000 / 样本 417,031 / 2560.6 MB
+  chunk_0002.npz: 局数 2,000 / 样本 410,254 / 2519.0 MB
+  chunk_0003.npz: 局数 2,000 / 样本 412,109 / 2530.4 MB
+  chunk_0004.npz: 局数 2,000 / 样本 415,131 / 2548.9 MB
+  chunk_0005.npz: 局数 2,000 / 样本 412,092 / 2530.2 MB
+  chunk_0006.npz: 局数 2,000 / 样本 411,924 / 2529.2 MB
+  chunk_0007.npz: 局数 2,000 / 样本 409,040 / 2511.5 MB
+  chunk_0008.npz: 局数 2,000 / 样本 410,149 / 2518.3 MB
+  chunk_0009.npz: 局数 2,000 / 样本 405,521 / 2489.9 MB
+  chunk_0010.npz: 局数 2,000 / 样本 413,642 / 2539.8 MB
+  chunk_0011.npz: 局数 2,000 / 样本 414,714 / 2546.3 MB
+  chunk_0012.npz: 局数 856 / 样本 177,525 / 1090.0 MB
+总字节      : 31.45 GB （50GB 硬上限内）
+
+校验结果：
+(a) chunk shape/dtype/取值校验：
+  chunk_0000.npz: N=412940 s(412940, 17, 19, 19) uint8 pi(412940,) uint16 z(412940,) int8 [OK]
+  chunk_0001.npz: N=417031 s(417031, 17, 19, 19) uint8 pi(417031,) uint16 z(417031,) int8 [OK]
+  chunk_0002.npz: N=410254 s(410254, 17, 19, 19) uint8 pi(410254,) uint16 z(410254,) int8 [OK]
+  chunk_0003.npz: N=412109 s(412109, 17, 19, 19) uint8 pi(412109,) uint16 z(412109,) int8 [OK]
+  chunk_0004.npz: N=415131 s(415131, 17, 19, 19) uint8 pi(415131,) uint16 z(415131,) int8 [OK]
+  chunk_0005.npz: N=412092 s(412092, 17, 19, 19) uint8 pi(412092,) uint16 z(412092,) int8 [OK]
+  chunk_0006.npz: N=411924 s(411924, 17, 19, 19) uint8 pi(411924,) uint16 z(411924,) int8 [OK]
+  chunk_0007.npz: N=409040 s(409040, 17, 19, 19) uint8 pi(409040,) uint16 z(409040,) int8 [OK]
+  chunk_0008.npz: N=410149 s(410149, 17, 19, 19) uint8 pi(410149,) uint16 z(410149,) int8 [OK]
+  chunk_0009.npz: N=405521 s(405521, 17, 19, 19) uint8 pi(405521,) uint16 z(405521,) int8 [OK]
+  chunk_0010.npz: N=413642 s(413642, 17, 19, 19) uint8 pi(413642,) uint16 z(413642,) int8 [OK]
+  chunk_0011.npz: N=414714 s(414714, 17, 19, 19) uint8 pi(414714,) uint16 z(414714,) int8 [OK]
+  chunk_0012.npz: N=177525 s(177525, 17, 19, 19) uint8 pi(177525,) uint16 z(177525,) int8 [OK]
+(b) 独立重转换（pi/z/s 与存储逐位一致）：
+  独立重转换比对：20/20 局完全一致（z 与胜者视角全部一致）
+(c) z 胜者-视角合规抽查：
+  z 视角合规率：1990/1990 = 1.0000（期望 1.0000）
+
+转换耗时    : 170.3s（jobs=20）
+校验耗时    : 90.9s
+总耗时      : 261.9s
+
+输出目录    : E:\AAAhuancun\betamaster\data\pretrain
+元数据      : E:\AAAhuancun\betamaster\data\pretrain\manifest_meta.jsonl / E:\AAAhuancun\betamaster\data\pretrain\chunks.jsonl
