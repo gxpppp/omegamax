@@ -448,6 +448,11 @@ def main(argv: "list[str] | None" = None) -> int:
                              "simulations=200; plan acceptance uses 40)")
     parser.add_argument("--board-size", type=int, default=None,
                         help="board edge (default: config board_size=19)")
+    parser.add_argument("--model", type=str, default=None,
+                        help="self-play with a loaded checkpoint (e.g. "
+                             "models/pretrain.pt): its recorded arch "
+                             "(blocks/channels/board_size) wins over the "
+                             "config")
     parser.add_argument("--komi", type=float, default=None,
                         help="komi on white (default: config komi=7.5)")
     parser.add_argument("--temperature-threshold", type=int, default=None,
@@ -473,8 +478,26 @@ def main(argv: "list[str] | None" = None) -> int:
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    size = int(args.board_size if args.board_size is not None else cfg["board_size"])
-    network = create_model(int(cfg["blocks"]), int(cfg["channels"]), size).to(device)
+    if args.model:
+        # P7: a checkpoint's recorded arch wins -- a b20c256 net self-plays
+        # at its own size even though the config default is b10c128/19.
+        # Lazy import: buffer.py imports selfplay.py at module load, and
+        # train.py imports buffer.py -- a module-level train import would
+        # be a circular-import cycle.
+        from omigamax.train.train import load_checkpoint
+        ckpt = load_checkpoint(args.model)
+        arch = ckpt["arch"]
+        size = int(arch["board_size"])
+        network = create_model(
+            int(arch["blocks"]), int(arch["channels"]), size
+        ).to(device)
+        network.load_state_dict(ckpt["model_state_dict"])
+    else:
+        size = int(args.board_size if args.board_size is not None
+                   else cfg["board_size"])
+        network = create_model(
+            int(cfg["blocks"]), int(cfg["channels"]), size
+        ).to(device)
 
     report, records = generate_games(
         network,

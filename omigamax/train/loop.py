@@ -130,6 +130,37 @@ SMOKE_PRESET = {
 
 
 # ---------------------------------------------------------------------------
+# architecture plumbing (P7: b20c256 RL fine-tuning without touching
+# config/default.yaml, which stays b10c128)
+# ---------------------------------------------------------------------------
+
+def apply_arch_overrides(
+    cfg: dict,
+    *,
+    blocks: "int | None" = None,
+    channels: "int | None" = None,
+    board_size: "int | None" = None,
+) -> dict:
+    """Copy ``cfg`` with explicit ``--blocks`` / ``--channels`` /
+    ``--board-size`` overrides applied.
+
+    P7 design: ``config/default.yaml`` is the immutable b10c128 acceptance
+    baseline; b20c256 is selected either by an explicit CLI override here or
+    by a loaded checkpoint's recorded arch (see :func:`_load_or_init`, which
+    gives checkpoints priority over the config). Returns a fresh dict so the
+    shared config object is never mutated.
+    """
+    cfg = dict(cfg)
+    if blocks is not None:
+        cfg["blocks"] = int(blocks)
+    if channels is not None:
+        cfg["channels"] = int(channels)
+    if board_size is not None:
+        cfg["board_size"] = int(board_size)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
 # evaluation scheduling
 # ---------------------------------------------------------------------------
 
@@ -429,41 +460,90 @@ def _log_loop_event(train_log, event: str, **fields) -> str:
 # model / optimizer / RNG (re)loading
 # ---------------------------------------------------------------------------
 
-def _load_or_init(cfg: dict, checkpoint_path, device, seed: int, resume: bool) -> dict:
-    """Build the run state: either from ``latest.pt`` (resume) or fresh init.
+def _model_from_checkpoint(
+    cfg: dict,
+    ckpt: dict,
+    device: torch.device,
+    seed: int,
+    *,
+    resumed: bool,
+    init_checkpoint: "str | Path | None",
+) -> dict:
+    """Build the run state from an existing checkpoint (resume or warm-start).
 
-    On resume the architecture is read from the checkpoint (not the config) so
-    a checkpoint written at a different board/net size restores correctly.
-    The buffer-sampling numpy RNG is restored from the persisted
-    ``rng_state`` so deterministic-resume stays exact (Oracle F9).
+    The checkpoint's recorded ``arch`` wins over the config (P7: a
+    ``models/pretrain.pt`` written at b20c256 restores a b20c256 net even
+    though ``config/default.yaml`` says b10c128). The SGD optimizer is rebuilt
+    with the loop's hyper-parameters (``lr``/``momentum``/``l2`` from cfg;
+    ``train_steps`` re-applies the scheduled lr before every step anyway) and
+    ``optimizer.load_state_dict`` restores its momentum buffers. The buffer
+    sampling RNG is restored from ``rng_state`` when present so a resumed run
+    stays deterministic (Oracle F9).
+    """
+    arch = ckpt["arch"]
+    model = create_model(
+        int(arch["blocks"]), int(arch["channels"]), int(arch["board_size"]),
+    ).to(device)
+    optimizer = make_sgd_optimizer(
+        model,
+        lr=float(cfg.get("lr", 0.2)),
+        momentum=float(cfg.get("momentum", 0.9)),
+        l2=float(cfg.get("l2", 1e-4)),
+    )
+    global_step = restore_from_checkpoint(ckpt, model, optimizer)
+    rng = np.random.default_rng(int(seed))
+    if "rng_state" in ckpt:
+        restore_rng(rng, ckpt["rng_state"])
+    extra = ckpt.get("extra") or {}
+    return {
+        "model": model, "optimizer": optimizer, "rng": rng,
+        "global_step": int(global_step),
+        "games_generated": int(extra.get("games_generated", 0)),
+        "steps_into_cycle": int(extra.get("steps_into_cycle", 0)),
+        "cycles_completed": int(extra.get("cycles_completed", 0)),
+        "resumed": resumed,
+        "init_checkpoint": (
+            None if init_checkpoint is None else str(init_checkpoint)
+        ),
+    }
+
+
+def _load_or_init(
+    cfg: dict,
+    checkpoint_path,
+    device,
+    seed: int,
+    resume: bool,
+    init_checkpoint: "str | Path | None" = None,
+) -> dict:
+    """Build the run state: resume, pretrained warm-start, or fresh init.
+
+    Architecture priority (P7, from highest to lowest):
+
+    1. ``models/latest.pt`` on ``--resume`` -- its recorded arch restores the
+       exact net that trained it;
+    2. ``init_checkpoint`` (e.g. ``models/pretrain.pt``) -- a *fresh* RL run
+       warm-started from the pretrained weights, its recorded arch winning
+       over the config;
+    3. the config (with any explicit ``--blocks``/``--channels``/
+       ``--board-size`` overrides the caller already applied).
+
+    ``config/default.yaml`` is never modified: b20c256 is selected by a
+    checkpoint's arch or by explicit flags, and the b10c128 config default
+    stays untouched. The buffer-sampling numpy RNG is restored from the
+    persisted ``rng_state`` so deterministic-resume stays exact (Oracle F9).
     """
     ckpt_path = Path(checkpoint_path)
     if resume and ckpt_path.exists():
-        ckpt = load_checkpoint(ckpt_path)
-        arch = ckpt["arch"]
-        model = create_model(
-            int(arch["blocks"]), int(arch["channels"]),
-            int(arch["board_size"]),
-        ).to(device)
-        optimizer = make_sgd_optimizer(
-            model,
-            lr=float(cfg.get("lr", 0.2)),
-            momentum=float(cfg.get("momentum", 0.9)),
-            l2=float(cfg.get("l2", 1e-4)),
+        return _model_from_checkpoint(
+            cfg, load_checkpoint(ckpt_path), device, int(seed),
+            resumed=True, init_checkpoint=None,
         )
-        global_step = restore_from_checkpoint(ckpt, model, optimizer)
-        rng = np.random.default_rng(int(seed))
-        if "rng_state" in ckpt:
-            restore_rng(rng, ckpt["rng_state"])
-        extra = ckpt.get("extra") or {}
-        return {
-            "model": model, "optimizer": optimizer, "rng": rng,
-            "global_step": int(global_step),
-            "games_generated": int(extra.get("games_generated", 0)),
-            "steps_into_cycle": int(extra.get("steps_into_cycle", 0)),
-            "cycles_completed": int(extra.get("cycles_completed", 0)),
-            "resumed": True,
-        }
+    if init_checkpoint is not None:
+        return _model_from_checkpoint(
+            cfg, load_checkpoint(init_checkpoint), device, int(seed),
+            resumed=False, init_checkpoint=init_checkpoint,
+        )
     torch.manual_seed(int(seed))
     model = create_model(
         int(cfg["blocks"]), int(cfg["channels"]), int(cfg["board_size"]),
@@ -479,6 +559,7 @@ def _load_or_init(cfg: dict, checkpoint_path, device, seed: int, resume: bool) -
         "model": model, "optimizer": optimizer, "rng": rng,
         "global_step": 0, "games_generated": 0,
         "steps_into_cycle": 0, "cycles_completed": 0, "resumed": False,
+        "init_checkpoint": None,
     }
 
 
@@ -487,12 +568,19 @@ def _load_or_init(cfg: dict, checkpoint_path, device, seed: int, resume: bool) -
 # ---------------------------------------------------------------------------
 
 def _run_eval_gate(model, optimizer, cfg, *, latest, best, history, device,
-                   games, sims, seed, max_moves: int = DEFAULT_EVAL_MAX_MOVES) -> dict:
-    """Run the todo-15 gate: candidate (``latest``) vs ``best``, record ELO."""
+                   games, sims, seed, max_moves: int = DEFAULT_EVAL_MAX_MOVES,
+                   board_size: "int | None" = None) -> dict:
+    """Run the todo-15 gate: candidate (``latest``) vs ``best``, record ELO.
+
+    ``board_size`` defaults to the *model's* architecture (P7: a b20c256 /
+    9x9 warm-started net must be evaluated on its own board size, not the
+    config's) -- the checkpoint arch drives both the net and the eval games.
+    """
     return evaluate_and_gate(
         str(latest), str(best), cfg,
         games=games, sims=sims,
-        size=int(cfg.get("board_size", 19)),
+        size=int(board_size if board_size is not None
+                 else model.board_size),
         komi=float(cfg.get("komi", 7.5)),
         virtual_loss=int(cfg.get("virtual_loss", 3)),
         max_moves=int(max_moves),
@@ -544,6 +632,7 @@ def run_loop(
     grad_clip: "float | None" = None,
     seed: int = 0,
     resume: bool = False,
+    init_checkpoint: "str | Path | None" = None,
     force_final_eval: bool = False,
     viz_enabled: "bool | None" = None,
     logger=None,
@@ -559,6 +648,10 @@ def run_loop(
     :func:`eval_due`). ``latest.pt`` is checkpointed before every gate and at
     the end of the run; a graceful interrupt (KeyboardInterrupt / SIGBREAK)
     checkpoint the in-flight state so ``--resume`` continues loss-exactly.
+    ``init_checkpoint`` warm-starts a *fresh* RL run from an external
+    checkpoint (e.g. ``models/pretrain.pt``): its recorded arch wins over the
+    config and the pretrained weights become the starting point (P7 RL
+    fine-tuning at b20c256; ignored when ``resume`` finds ``latest.pt``).
 
     Returns a report dict (also used as the todo-16 evidence JSON).
     """
@@ -602,7 +695,6 @@ def run_loop(
     schedule_steps = tuple(int(s) for s in cfg.get("lr_schedule_steps",
                                                    [50000, 100000]))
     keep_games = int(cfg.get("replay_buffer_games", 1000))
-    board_size = int(cfg.get("board_size", 19))
 
     torch.manual_seed(int(seed))
     torch.backends.cudnn.deterministic = True
@@ -611,13 +703,20 @@ def run_loop(
     latest = latest_checkpoint_path(checkpoint_dir)
     best = best_checkpoint_path(checkpoint_dir)
 
-    st = _load_or_init(cfg, latest, device, int(seed), bool(resume))
+    st = _load_or_init(cfg, latest, device, int(seed), bool(resume),
+                       init_checkpoint=init_checkpoint)
     model, optimizer, rng = st["model"], st["optimizer"], st["rng"]
     global_step = int(st["global_step"])
     games_generated = int(st["games_generated"])
     steps_into_cycle = int(st["steps_into_cycle"])
     cycles_completed = int(st["cycles_completed"])
     resumed = bool(st["resumed"])
+
+    # P7: the board size follows the *model* (checkpoint arch wins over the
+    # config) so self-play / buffer / viz / the eval gate all use the net's
+    # own size -- a b20c256-19 warm-start stays on 19x19, and a 9x9 net is
+    # self-played on 9x9 even if the config says 19.
+    board_size = int(model.board_size)
 
     buffer = ReplayBuffer(data_dir, max_games=keep_games, board_size=board_size)
 
@@ -681,7 +780,8 @@ def run_loop(
                             history=history, device=device, games=eval_games,
                             sims=eval_sims,
                             seed=int(seed) + int(cycles_done),
-                            max_moves=eval_max_moves)
+                            max_moves=eval_max_moves,
+                            board_size=board_size)
         current_elo = float(ev.get("elo_update", {}).get("elo", current_elo))
         last_eval_step = int(global_step)
         eval_reports.append(ev)
@@ -749,7 +849,7 @@ def run_loop(
                         model, cfg, games=1, data_dir=data_dir,
                         keep=keep_games, seed=int(seed) + games_generated,
                         simulations=simulations, max_moves=selfplay_max_moves,
-                        frame_callback=_per_move_frame)
+                        size=board_size, frame_callback=_per_move_frame)
                     games_generated += 1
                     buffer.refresh()
                     if viz.get("started"):
@@ -785,7 +885,7 @@ def run_loop(
                             keep=keep_games, seed=int(seed) + games_generated,
                             simulations=simulations,
                             max_moves=selfplay_max_moves,
-                            frame_callback=_per_move_frame)
+                            size=board_size, frame_callback=_per_move_frame)
                         games_generated += 1
                         buffer.refresh()
                         if viz.get("started"):
@@ -923,6 +1023,10 @@ def run_loop(
             "seed": int(seed),
             "resume": bool(resume),
             "resumed": resumed,
+            "init_checkpoint": (
+                None if init_checkpoint is None else str(init_checkpoint)
+            ),
+            "board_size": board_size,
             "force_final_eval": force_final_eval,
             "viz_enabled": viz_enabled,
             "viz": viz,
@@ -1009,6 +1113,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true",
                         help="resume from models/latest.pt + data/selfplay "
                              "(requires an existing checkpoint)")
+    parser.add_argument("--init-checkpoint", type=str, default=None,
+                        help="start a FRESH RL run warm-started from this "
+                             "checkpoint (e.g. models/pretrain.pt): its "
+                             "recorded arch (blocks/channels/board_size) wins "
+                             "over the config. Ignored when --resume finds "
+                             "models/latest.pt.")
+    parser.add_argument("--blocks", type=int, default=None,
+                        help="override config blocks for a fresh-init run "
+                             "(config default 10; checkpoint arch wins when "
+                             "--resume/--init-checkpoint loads one)")
+    parser.add_argument("--channels", type=int, default=None,
+                        help="override config channels for a fresh-init run "
+                             "(config default 128)")
+    parser.add_argument("--board-size", type=int, default=None,
+                        help="override config board_size for a fresh-init "
+                             "run (config default 19)")
     parser.add_argument("--interrupt-at-steps", type=int, default=None,
                         help="simulate Ctrl+C after this many training steps "
                              "(exercises the graceful checkpoint path)")
@@ -1068,6 +1188,10 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.smoke:
         cfg = dict(cfg)          # never mutate the shared config dict
         cfg.update(SMOKE_PRESET)
+    cfg = apply_arch_overrides(
+        cfg,
+        blocks=args.blocks, channels=args.channels, board_size=args.board_size,
+    )
 
     device = torch.device(
         args.device if args.device is not None
@@ -1099,6 +1223,7 @@ def main(argv: "list[str] | None" = None) -> int:
             grad_clip=args.grad_clip,
             seed=args.seed,
             resume=args.resume,
+            init_checkpoint=args.init_checkpoint,
             force_final_eval=bool(args.smoke),
             viz_enabled=viz_enabled,
             interrupt_after=args.interrupt_at_steps,
