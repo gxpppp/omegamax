@@ -66,3 +66,12 @@ models/pretrain.pt 存在，load_checkpoint 结果:
   P7 路径验证: load_checkpoint -> create_model(**arch) -> load_state_dict
   -> params 23,962,085 —— 成功。
 --resume 验证: 续跑 5 步 global_step 200→205（step 计数接续、arch 校验通过）。
+
+提交与推送
+--------------------------------------------------------------------------
+commit: ed2f0d8759da3e83fb708d3859b03bfd8f7dd6f0
+  "feat(train): 监督预训练 CLI（人类棋谱 SL）"
+  4 files changed, 918 insertions(+)（omigamax/train/pretrain.py、
+  omigamax/cli/pretrain.py、tests/test_pretrain.py、本证据）
+push  : OK —— 7310da8..ed2f0d8 main -> main（github.com/gxpppp/omegamax）
+
