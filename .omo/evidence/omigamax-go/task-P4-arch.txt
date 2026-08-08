@@ -1,0 +1,39 @@
+task-P4: b20c256 architecture verification (supervised-pretraining target)
+==========================================================================
+Date: 2026-08-08 | GPU: NVIDIA GeForce RTX 3060 Laptop GPU (5.999 GiB), FREE
+Model: create_model(blocks=20, channels=256, board_size=19)  [b20c256 @ 19]
+Purpose: verify feasibility of the P5 supervised-pretraining architecture at
+batch 64, record ground truth. Config/default.yaml UNTOUCHED (b10c128 stays
+the default; P5 passes arch via explicit args).
+
+Ground truth
+------------
+- parameter count: 23,962,085  (23.96M)
+    vs b10c128 = 3,282,661  (~7.3x params; deliberate user-approved upgrade,
+    "3M family" scaled up; within the planned 10M-30M band)
+
+Memory (torch.cuda.max_memory_allocated, todo-8 protocol: SGD momentum + L2
+weight-decay optimizer, forward+backward steps, GPU)
+- batch 64, 50 optimizer steps: peak = 2.1489 GB  <= 5.5 GB  PASS
+- batch 128, 3 steps (headroom probe): peak = 4.1432 GB  <= 5.5 GB  PASS
+  (batch 128 also fits on this 6 GB card -- no OOM; ~1.36 GB headroom)
+
+Timing
+- forward+backward @ batch 64: 339.7 ms/step  (50 steps wall / 50)
+- inference latency, batch 16, eval + no_grad: 33.5 ms/forward  (self-play target)
+
+File size
+- state_dict bytes: 96,017,135  (91.6 MiB, fp32)
+
+Sanity
+- forward shapes: policy (1, 362), value (1, 1) -- all finite
+- state_dict save/load round-trip: torch.equal = True (exact)
+
+Tests
+- tests/test_pretrain_arch.py added (4 tests): param-count band + exact value,
+  forward shape/finite, checkpoint round-trip, GPU-gated memory @ batch 64.
+- uv run pytest -q: 442 passed (438 baseline + 4 new), 1 warning (pygame).
+
+Verdict: b20c256 @ batch 64 is FEASIBLE on this 6 GB GPU for
+supervised pretraining (2.15 GB peak, under half the 5.5 GB budget; batch 128
+also fits at 4.14 GB). 24M params / 340 ms per train step @ batch 64.
