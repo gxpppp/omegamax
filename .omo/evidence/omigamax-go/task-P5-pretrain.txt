@@ -1,0 +1,68 @@
+task-P5: 监督预训练 CLI（人类棋谱 SL）
+==========================================================================
+Date: 2026-08-08 | GPU: NVIDIA GeForce RTX 3060 Laptop GPU (5.999 GiB), FREE
+HEAD: 7310da8 (test(train): b20c256 架构验证)
+
+设计（omigamax/train/pretrain.py + omigamax/cli/pretrain.py，均为新文件，
+未改 config/default.yaml、未改任何既有 omigamax/ 模块）
+--------------------------------------------------------------------------
+* loader: PretrainChunks —— 对 data/pretrain/chunk_*.npz 逐个 np.load(mmap)
+  打开（13 文件 / 31.45GB 只占虚拟地址、不占 RAM），按总样本数 5,122,072
+  均匀抽样（rng.integers），按 chunk 分组读取仅命中的行。抽样由调用方传入
+  的 np.random.Generator 驱动，seed 可复现，rng 状态持久化进 checkpoint
+  （与 AGZ 回放缓冲同一机制）。
+* 输入: s uint8(0/1) → float32（.to(dtype=float32)，等价 /255）；pi uint16
+  0..360（+361=pass）→ int64 → F.one_hot(362)；z int8(±1) → float32。
+* loss: policy = CE 作用于全部 362 logits vs 人类着的一热（人为着本应合法，
+  不加 legal-mask —— 加 mask 会泄漏合法性监督）；value = MSE(tanh value, z)；
+  total = policy + value。复用 omigamax/train/loss.py 的
+  policy_cross_entropy / value_mse / agz_loss / make_sgd_optimizer。
+* optimizer: SGD momentum 0.9, weight_decay 1e-4, grad-clip 1.0（todo-14
+  实证值）；lr 默认 0.02 —— 故意比 RL 的 0.2 低 10x：人类着是一热稀疏目标
+  （无 MCTS 温度、等价着多），大 lr 会让共享骨干过拟合单个人类选择；且该
+  checkpoint 是 P7 RL 的 warm-start，保守 lr 保护已学表示（docstring 已注明）。
+* lr schedule: --lr-steps [50000] 半衰（pretrain_lr: lr_base*0.5^k）。
+* checkpoint: 复用 omigamax/train/train.py 的 save_checkpoint / load_checkpoint
+  （同 format: model_state_dict + optimizer_state_dict + global_step + arch +
+  rng_state）→ models/pretrain.pt；--resume 续跑（arch 校验 + step 接续）。
+* metrics/step: loss_total/loss_policy/loss_value/acc_top1/lr → logs/pretrain.jsonl
+  （--log-every 10）。
+
+测试（tests/test_pretrain.py，新增 12 个）
+--------------------------------------------------------------------------
+(a) loader: test_loader_shapes_dtypes_values / test_loader_sampling_deterministic_
+    with_seed / test_loader_batch_spans_chunks_and_rows_exist / test_loader_
+    empty_dir_raises —— shape/dtype/取值（s uint8 0/1、pi 0..361、z ±1）、
+    同 seed 抽样逐位一致、跨 chunk 分批且每行可回溯到语料。
+(b) loss: test_onehot_policy_ce_equals_cross_entropy（一热 CE == F.cross_entropy）、
+    test_value_mse_correct_hand_made、test_agz_loss_equals_policy_plus_value、
+    test_pretrain_step_metrics_components_consistent、test_pretrain_lr_schedule。
+(c) 微型真实训练: test_tiny_pretrain_run_checkpoint_roundtrip_and_resume
+    —— 9x9 blocks=1 channels=8，3 个合成 mini-game 转 npz，batch 8，30 步：
+    loss 下降（0.98 门槛）、checkpoint 带 arch 往返、create_model(**arch)
+    载入逐参数相等、resume 续跑 step 30→40。
+(d) b20c256 GPU 冒烟: test_b20c256_gpu_smoke_20_steps_loss_and_memory
+    —— 20 步 batch 64：loss 下降、peak <= 5.5GB。
+
+pytest 全量: 454 passed（442 基线 + 12 新增），1 warning（pygame）。
+
+真实数据 200 步冒烟（uv run python -m omigamax.cli.pretrain --steps 200
+--batch-size 64 --lr 0.02 --blocks 20 --channels 256）
+--------------------------------------------------------------------------
+- data: 5,122,072 positions across 13 chunks（验证通过）
+- loss first : total 7.8723  policy 6.6797  value 1.1926  top1 0.00%
+- loss last  : total 6.7911  policy 5.7814  value 1.0097  top1 1.56%
+- loss ratio : 0.863（loss 单调下降，JSONL 逐 10 步可查）
+- speed      : 359.9 ms/step（72.0s / 200 steps；P4 基线 339.7ms，吻合）
+- peak gpu   : 2.149 GB（<= 5.5 GB 预算；P4 基线 2.149GB，完全一致）
+- lr         : 0.02 恒定（schedule 边界 50000 未触发）
+
+checkpoint 与 P7 兼容性
+--------------------------------------------------------------------------
+models/pretrain.pt 存在，load_checkpoint 结果:
+  format=omigamax-train-checkpoint  version=1  global_step=200
+  arch={'blocks': 20, 'channels': 256, 'board_size': 19}
+  rng_state=True  optimizer_state_dict=True
+  P7 路径验证: load_checkpoint -> create_model(**arch) -> load_state_dict
+  -> params 23,962,085 —— 成功。
+--resume 验证: 续跑 5 步 global_step 200→205（step 计数接续、arch 校验通过）。
