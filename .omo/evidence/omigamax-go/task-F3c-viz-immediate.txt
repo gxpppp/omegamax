@@ -1,0 +1,81 @@
+Task F3c: 可视化启动即弹窗与逐局推帧 (immediate window + per-game frames)
+=========================================================================
+Date: 2026-08-08
+HEAD base: 021433a (F3b)
+Fix scope: omigamax/train/loop.py + tests/test_loop.py only (no config, no
+selfplay.py / buffer.py changes).
+
+THE PROBLEM
+-----------
+The pygame window opened only after the whole cycle's self-play batch
+finished (~25 min at sims 100): the F3b fix pushed one frame after the
+batch, and VizThread opens the window lazily on its FIRST frame.
+
+THE FIX (two changes, both in run_loop / loop.py seams)
+-------------------------------------------------------
+1. IMMEDIATE WINDOW (opening frame):
+   New helper loop.push_opening_frame(viz, board_size, komi=...): builds a
+   Snapshot directly from the dataclass with an EMPTY board (all zeros),
+   move_number=0, current_player=BLACK, games=0, train_step/loss/elo=None.
+   Called in run_loop() right after start_viz_if_available() returns, BEFORE
+   the cycle loop -- so the window pops up within seconds of launch. Guarded
+   by viz.get("started") and fully try/except-wrapped: viz can never slow or
+   crash training.
+
+2. PER-GAME PUSH:
+   The fresh-cycle self-play phase now generates ONE game per
+   generate_games(games=1) call in a loop, with buffer.refresh() +
+   push_selfplay_frame() (train_step=None) after EACH game -- replacing the
+   single generate_games(games=N) + batch push. The mid-cycle resume
+   defensive-fallback regeneration got the same per-game treatment; resume
+   with games already on disk pushes the newest game once. Per-train-step
+   push (F2) is untouched.
+
+SEED-CONTINUITY EQUIVALENCE
+---------------------------
+Seeds are passed as seed=int(seed)+games_generated and games_generated is
+incremented after every game, exactly as the batch call did internally
+(generate_games games=N uses seeds seed+0..seed+N-1). So the npz set,
+filenames and buffer contents are identical to one batch call. Proof:
+- tests/test_loop.py::TestCycleWiring::test_cycle_order_and_args now asserts
+  generate_games is called as [("selfplay", 42, 1), ("selfplay", 43, 1)]
+  (per-game, continuous seeds) instead of [("selfplay", 42, 2)].
+- test_two_cycles_advance_games_and_evals asserts seeds [7, 8, 9, 10]
+  (continuous across two cycles of 2 games) instead of [7, 9].
+- test_resume_requires_no_duplicate_generation updated: 2 per-game calls on
+  the first leg, unchanged on resume.
+
+TESTS (tests/test_loop.py, TestVizFeed) -- all 432 existing stay green, 2 new:
+- test_frames_pushed_during_training (updated): queue now holds 8 frames --
+  1 opening + 2 per-game + 5 per-train-step; oldest is the opening empty
+  board (games==0, train_step None, all zeros); per-game frames have
+  games==1/2 and train_step None; newest has live train metrics.
+- test_frame_pushed_during_selfplay_phase (updated): queue size at the FIRST
+  train step is exactly 3 (opening + 2 per-game frames) -- frames flowed
+  during self-play, before any training.
+- test_opening_frame_pushed_immediately (NEW): records queue state at the
+  moment the FIRST generate_games call fires -- >= 1 frame (the opening empty
+  board) is already enqueued before any game is generated.
+- test_frame_after_first_game_of_cycle (NEW): a frame with the first game's
+  board (games==1, train_step None) exists in the queue during self-play.
+
+HEADLESS LIVE PROOF (SDL_VIDEODRIVER=dummy + CountingQueue)
+------------------------------------------------------------
+Real tiny loop (9x9, blocks=1, channels=8, sims=4, 2 games/cycle,
+5 steps/cycle) with instrumented queue + wrappers around generate_games and
+train_steps:
+
+    gen_calls (per-game):               2
+    frames pushed BEFORE first game:    1        <- opening frame at t~0
+    queue size at first game call:      1
+    queue size at first train step:     3        <- opening + 2 per-game
+    total frames pushed this run:       8        <- 1 opening + 2 game + 5 train
+    expected: 1 opening + 2 per-game + 5 train = 8
+    RESULT: PASS (opening frame at t~0; per-game frames during self-play)
+
+PYTEST
+------
+uv run pytest -q
+434 passed, 1 warning in 39.81s   (432 baseline + 2 new tests)
+
+git: commit fix(train): 可视化启动即弹窗与逐局推帧 (see git log)

@@ -44,7 +44,11 @@ Per the plan (todo 16, authoritative) and AGZ (Nature 550, 2017, Methods fig. 1)
   The **self-play phase** feeds it too (F3b): right after each cycle's
   ``generate_games`` batch lands on disk and the buffer refreshes, one frame
   of the just-finished game is pushed so the window opens while self-play is
-  still running -- not only once train steps start.
+  still running -- not only once train steps start. F3c sharpens this: an
+  empty-board **opening frame** is pushed immediately after the viz thread
+  starts (window pops up within seconds of launch), and self-play now
+  generates one game at a time with a frame pushed after EACH game, so the
+  user watches each game finish instead of waiting for the whole batch.
 
 Single-process self-play only (plan Must-NOT: no multiprocessing yet).
 
@@ -309,6 +313,43 @@ def push_selfplay_frame(viz, buffer, board_size, *, komi, games, train_step,
         loss=None, elo=elo))
 
 
+def push_opening_frame(viz, board_size, *, komi) -> bool:
+    """Push an empty-board opening frame so the window appears immediately.
+
+    F3c: the pygame window is opened lazily by ``VizThread`` only once the
+    FIRST frame arrives, so with viz on it used to stay invisible until the
+    first self-play game (or train step) finished -- ~25 min at low sims.
+    Calling this right after :func:`start_viz_if_available` returns
+    ``started=True`` (before the cycle loop even runs) makes the window pop
+    up within seconds of launch, showing an empty board (move 0, black to
+    play, no metrics yet).
+
+    Built directly on the ``Snapshot`` dataclass because the buffer is empty
+    at launch (``viz_board_info`` would return ``None``). Non-blocking /
+    try-except-wrapped like :func:`push_viz_frame` -- viz can never slow or
+    crash training. Returns True when a frame was enqueued.
+    """
+    if not viz.get("started"):
+        return False
+    try:
+        from omigamax.viz.board_window import Snapshot
+    except Exception:  # noqa: BLE001 - viz must never break the loop
+        return False
+    n = int(board_size)
+    empty_board = [[0] * n for _ in range(n)]
+    return push_viz_frame(viz, Snapshot(
+        board=empty_board,
+        board_size=n,
+        move_number=0,
+        current_player=BLACK,
+        komi=float(komi),
+        games=0,
+        train_step=None,
+        loss=None,
+        elo=None,
+    ))
+
+
 # ---------------------------------------------------------------------------
 # JSONL helpers (explicit UTF-8, one JSON object per line)
 # ---------------------------------------------------------------------------
@@ -548,6 +589,14 @@ def run_loop(
         "steps_into_cycle=%d viz=%s",
         resumed, global_step, games_generated, steps_into_cycle, viz["reason"])
 
+    # F3c: the window pops up within seconds of launch -- push an empty-board
+    # opening frame right after the viz thread starts (before any game has
+    # been generated), so the user sees the board immediately instead of
+    # waiting ~25 min for the first self-play frame. Non-blocking and
+    # try/except-wrapped inside push_opening_frame: viz can never slow or
+    # crash training.
+    push_opening_frame(viz, board_size, komi=float(cfg.get("komi", 7.5)))
+
     # run bookkeeping
     interrupted = False
     cycles_done = 0
@@ -615,48 +664,74 @@ def run_loop(
             if steps_into_cycle == 0:
                 # start of a cycle: self-play first (model unchanged since the
                 # last checkpoint, so interrupted partial games regenerate
-                # deterministically from the same seeds).
-                rep, _records = generate_games(
-                    model, cfg, games=games_per_cycle, data_dir=data_dir,
-                    keep=keep_games, seed=int(seed) + games_generated,
-                    simulations=simulations, max_moves=selfplay_max_moves)
-                games_generated += games_per_cycle
-                buffer.refresh()
+                # deterministically from the same seeds). F3c: generate one
+                # game at a time and push a viz frame after EACH one, so the
+                # user watches each game finish (~3-6 min apart) instead of
+                # waiting for the whole batch. Seeds stay continuous: every
+                # call passes seed=int(seed)+games_generated and increments
+                # games_generated, so the npz set / buffer contents are
+                # identical to one generate_games(games=N) batch call.
+                rep = {"games": 0, "sims": 0, "wall_time_s": 0.0,
+                       "sims_per_sec": 0.0}
+                for _ in range(games_per_cycle):
+                    r, _records = generate_games(
+                        model, cfg, games=1, data_dir=data_dir,
+                        keep=keep_games, seed=int(seed) + games_generated,
+                        simulations=simulations, max_moves=selfplay_max_moves)
+                    games_generated += 1
+                    buffer.refresh()
+                    if viz.get("started"):
+                        push_selfplay_frame(
+                            viz, buffer, board_size,
+                            komi=float(cfg.get("komi", 7.5)),
+                            games=buffer.num_games, train_step=None,
+                            elo=current_elo)
+                    rep["games"] += int(r.get("games", 1))
+                    rep["sims"] += int(r.get("sims", 0))
+                    rep["wall_time_s"] += float(r.get("wall_time_s", 0.0))
+                rep["sims_per_sec"] = (
+                    rep["sims"] / rep["wall_time_s"]
+                    if rep["wall_time_s"] > 0 else 0.0)
                 logger.info(
                     "cycle %d: generated %d self-play games (step %d, "
-                    "%.1f sims/s)", cycle_no, games_per_cycle, global_step,
-                    float(rep.get("sims_per_sec", 0.0)))
+                    "%.1f sims/s)", cycle_no, rep["games"], global_step,
+                    float(rep["sims_per_sec"]))
                 _log_loop_event(train_log, "cycle_start", cycle=cycle_no,
-                                step=global_step, games=games_per_cycle,
+                                step=global_step, games=rep["games"],
                                 games_generated=games_generated)
             else:
                 # mid-cycle resume: the games are already on disk from before
                 # the interrupt; just refresh the window. Defensive fallback:
                 # if the data dir was wiped meanwhile, regenerate determin-
-                # istically (same model, same seeds).
+                # istically (same model, same seeds) -- again one game at a
+                # time with a frame pushed after each (F3c).
                 buffer.refresh()
                 if buffer.num_games == 0:
-                    rep, _records = generate_games(
-                        model, cfg, games=games_per_cycle, data_dir=data_dir,
-                        keep=keep_games, seed=int(seed) + games_generated,
-                        simulations=simulations, max_moves=selfplay_max_moves)
-                    games_generated += games_per_cycle
-                    buffer.refresh()
+                    for _ in range(games_per_cycle):
+                        generate_games(
+                            model, cfg, games=1, data_dir=data_dir,
+                            keep=keep_games, seed=int(seed) + games_generated,
+                            simulations=simulations,
+                            max_moves=selfplay_max_moves)
+                        games_generated += 1
+                        buffer.refresh()
+                        if viz.get("started"):
+                            push_selfplay_frame(
+                                viz, buffer, board_size,
+                                komi=float(cfg.get("komi", 7.5)),
+                                games=buffer.num_games, train_step=None,
+                                elo=current_elo)
+                elif viz.get("started"):
+                    # games already on disk: push the newest one so the window
+                    # shows a real board right away on resume.
+                    push_selfplay_frame(
+                        viz, buffer, board_size,
+                        komi=float(cfg.get("komi", 7.5)),
+                        games=buffer.num_games, train_step=None,
+                        elo=current_elo)
                 logger.info(
                     "cycle %d: resuming mid-cycle (step %d, %d/%d steps done)",
                     cycle_no, global_step, steps_into_cycle, steps_per_cycle)
-
-            # F3b: the live window opens during the self-play phase too, not
-            # only once train steps start pushing (F2). Right after the
-            # buffer refresh the newest npz IS the just-finished game, so push
-            # its board now -- the user watches each cycle's games as they
-            # land. Non-blocking / try-except-wrapped: viz never slows or
-            # crashes training.
-            if viz.get("started"):
-                push_selfplay_frame(
-                    viz, buffer, board_size, komi=float(cfg.get("komi", 7.5)),
-                    games=buffer.num_games, train_step=global_step,
-                    elo=current_elo)
 
             remaining_in_cycle = steps_per_cycle - steps_into_cycle
             if remaining_budget is not None:

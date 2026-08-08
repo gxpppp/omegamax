@@ -218,28 +218,34 @@ class TestVizFeed:
             cycles=1, games_per_cycle=2, steps_per_cycle=5,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        # 1 self-play-phase frame (F3b) + one frame per train step (F2)
-        assert len(queue) == 6
+        # 1 opening frame (F3c) + 2 per-game frames (F3c) + one frame per
+        # train step (F2)
+        assert len(queue) == 8
         snaps = []
         while True:
             s = queue.poll(timeout=0.01)
             if s is None:
                 break
             snaps.append(s)
-        assert len(snaps) == 6
-        # the oldest frame is the self-play-phase frame (no loss yet)
-        assert snaps[0].train_step == 0
+        assert len(snaps) == 8
+        # oldest frame: the opening empty-board frame (no games, no metrics)
+        assert snaps[0].train_step is None
         assert snaps[0].loss is None
-        assert snaps[0].games >= 1
-        # the newest frame carries the last train step's live metrics
+        assert snaps[0].games == 0
+        assert all(v == 0 for row in snaps[0].board for v in row)
+        # next: per-game self-play frames (board present, no train step yet)
+        assert snaps[1].games == 1 and snaps[1].train_step is None
+        assert snaps[2].games == 2 and snaps[2].train_step is None
+        # newest frame carries the last train step's live metrics
         last = snaps[-1]
         assert last.train_step >= 1
         assert last.loss is not None and last.games >= 1
 
     def test_frame_pushed_during_selfplay_phase(self, tmp_path, monkeypatch):
-        """F3b: with viz on, a frame is enqueued during the self-play phase --
-        before ANY training step runs -- so the window opens while the cycle's
-        games are being generated, not only once training starts."""
+        """F3b/F3c: with viz on, frames are enqueued during the self-play
+        phase -- before ANY training step runs -- so the window opens while
+        the cycle's games are being generated, not only once training
+        starts."""
         from omigamax.viz.board_window import SnapshotQueue
 
         monkeypatch.setattr(loop, "generate_games", fake_generate_games)
@@ -271,9 +277,104 @@ class TestVizFeed:
             cycles=1, games_per_cycle=2, steps_per_cycle=5,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        # by the time the FIRST training step runs, the self-play frame was
-        # already enqueued (the window would already be open)
-        assert qsize_at_first_step["qsize"] >= 1
+        # by the time the FIRST training step runs, 3 frames were already
+        # enqueued: the opening empty board + one per finished game
+        assert qsize_at_first_step["qsize"] == 3
+
+    def test_opening_frame_pushed_immediately(self, tmp_path, monkeypatch):
+        """F3c: the opening empty-board frame is pushed right after the viz
+        thread starts -- the queue is non-empty before ANY game is generated
+        (window pops up within seconds of launch)."""
+        from omigamax.viz.board_window import SnapshotQueue
+
+        seen: dict = {}
+        real_generate_games = loop.generate_games
+
+        def recording_generate_games(network, cfg, games, data_dir, keep,
+                                     seed, simulations, **kwargs):
+            if "qsize" not in seen:
+                # first call happens after start_viz_if_available returned --
+                # the opening frame must already be in the queue
+                seen["qsize"] = len(queue)
+                seen["frame"] = queue.poll(timeout=0.01)
+            return real_generate_games(network, cfg, games,
+                                       data_dir=data_dir, keep=keep,
+                                       seed=seed, simulations=simulations,
+                                       **kwargs)
+
+        monkeypatch.setattr(loop, "generate_games", recording_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+        queue = SnapshotQueue(maxlen=32)
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": queue, "thread": None, "stop": lambda: None,
+            },
+        )
+        loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=2,
+            batch_size=8, use_symmetry=False, seed=0,
+        )
+        # the opening frame was already enqueued before the first game
+        assert seen["qsize"] >= 1
+        frame = seen["frame"]
+        assert frame is not None
+        assert frame.games == 0
+        assert frame.train_step is None
+        assert frame.move_number == 0
+        assert all(v == 0 for row in frame.board for v in row)
+
+    def test_frame_after_first_game_of_cycle(self, tmp_path, monkeypatch):
+        """F3c: after the first game of the cycle lands, a frame with that
+        game's board (train_step None) is in the queue -- the window shows
+        each finished game during self-play."""
+        from omigamax.viz.board_window import SnapshotQueue
+
+        monkeypatch.setattr(loop, "generate_games", fake_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+        queue = SnapshotQueue(maxlen=32)
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": queue, "thread": None, "stop": lambda: None,
+            },
+        )
+        # record the queue contents right after the FIRST game is generated
+        seen: dict = {}
+        real_train_steps = loop.train_steps
+
+        def recording_train_steps(model, optimizer, buffer, steps, **kwargs):
+            if "qsize_after_game1" not in seen:
+                seen["qsize_after_game1"] = len(queue)
+            return real_train_steps(model, optimizer, buffer, steps, **kwargs)
+
+        monkeypatch.setattr(loop, "train_steps", recording_train_steps)
+        loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=3,
+            batch_size=8, use_symmetry=False, seed=0,
+        )
+        # opening + one frame per finished game => >= 2 after the first game
+        assert seen["qsize_after_game1"] >= 2
+        snaps = []
+        while True:
+            s = queue.poll(timeout=0.01)
+            if s is None:
+                break
+            snaps.append(s)
+        # find the per-game frame with the first game's board
+        game_frame = next(s for s in snaps if s.games == 1)
+        assert game_frame.train_step is None
+        assert game_frame.board is not None
 
     def test_push_failure_never_crashes_training(self, tmp_path, monkeypatch):
         """A broken queue must not abort the training loop."""
@@ -360,18 +461,20 @@ class TestCycleWiring:
             batch_size=8, use_symmetry=False, seed=42,
         )
 
-        # one self-play generation per cycle (seed 42), 3 train steps, 1 gate
+        # F3c: self-play generates one game per call, seeds staying
+        # continuous (42, 43) -- the npz set equals a batch call with
+        # seed=42, games=2; then 3 train steps, 1 gate
         selfplay = [c for c in calls if c[0] == "selfplay"]
         trains = [c for c in calls if c[0] == "train"]
         evals = [c for c in calls if c[0] == "eval"]
-        assert selfplay == [("selfplay", 42, 2)]
+        assert selfplay == [("selfplay", 42, 1), ("selfplay", 43, 1)]
         assert [c[1] for c in trains] == [0, 1, 2]  # global_steps before step
         assert len(evals) == 1 and evals[0][1] == "latest.pt"
 
         # gate fires after the cycle's training
         assert calls.index(("eval", "latest.pt")) > calls.index(("train", 2))
         # the self-play generation happens before any training
-        assert calls.index(("selfplay", 42, 2)) < calls.index(("train", 0))
+        assert calls.index(("selfplay", 42, 1)) < calls.index(("train", 0))
 
         assert report["loop"]["global_step_final"] == 3
         assert report["loop"]["cycles_done"] == 1
@@ -414,8 +517,8 @@ class TestCycleWiring:
             cycles=2, games_per_cycle=2, steps_per_cycle=2,
             batch_size=8, use_symmetry=False, seed=7,
         )
-        # seeds continue across cycles: 7 then 7+2
-        assert seeds == [7, 9]
+        # seeds continue across cycles, one per game: 7, 8 then 9, 10
+        assert seeds == [7, 8, 9, 10]
         assert n_evals["n"] == 2  # one gate per cycle
         assert report["loop"]["global_step_final"] == 4
         assert report["loop"]["cycles_done"] == 2
@@ -546,7 +649,7 @@ class TestResumeContinuity:
         monkeypatch.setattr(loop, "generate_games", counting_gen)
         monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
 
-        # first leg interrupted mid-cycle
+        # first leg interrupted mid-cycle: 2 per-game calls (F3c), one npz each
         loop.run_loop(
             make_cfg(), device=DEVICE,
             data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
@@ -555,7 +658,7 @@ class TestResumeContinuity:
             cycles=1, games_per_cycle=2, steps_per_cycle=10,
             batch_size=8, use_symmetry=False, seed=1, interrupt_after=5,
         )
-        assert gen_calls["n"] == 1
+        assert gen_calls["n"] == 2  # one per game
 
         # resumed leg: games already on disk -> no new generation
         loop.run_loop(
@@ -566,7 +669,7 @@ class TestResumeContinuity:
             cycles=1, games_per_cycle=2, steps_per_cycle=10,
             batch_size=8, use_symmetry=False, seed=1, resume=True,
         )
-        assert gen_calls["n"] == 1  # unchanged
+        assert gen_calls["n"] == 2  # unchanged
 
 
 # ---------------------------------------------------------------------------
