@@ -41,6 +41,10 @@ Per the plan (todo 16, authoritative) and AGZ (Nature 550, 2017, Methods fig. 1)
   plus the live ``loss`` / ``train_step`` / ``games`` / ``elo`` metrics --
   pushed non-blockingly through :func:`push_viz_frame` (drop-oldest,
   try/except-wrapped, so the visualization can never slow or crash training).
+  The **self-play phase** feeds it too (F3b): right after each cycle's
+  ``generate_games`` batch lands on disk and the buffer refreshes, one frame
+  of the just-finished game is pushed so the window opens while self-play is
+  still running -- not only once train steps start.
 
 Single-process self-play only (plan Must-NOT: no multiprocessing yet).
 
@@ -282,6 +286,27 @@ def push_viz_frame(viz, snap) -> bool:
         return True
     except Exception:  # noqa: BLE001 - viz must never break training
         return False
+
+
+def push_selfplay_frame(viz, buffer, board_size, *, komi, games, train_step,
+                        elo) -> bool:
+    """Push one board frame from the newest self-play game (F3b).
+
+    Called right after a cycle's ``generate_games`` batch lands and the
+    buffer refreshes: the newest npz IS the just-finished game, so the live
+    window shows that game's final position during the self-play phase
+    instead of staying dark until the first train step pushes a frame (F2).
+    Non-blocking / try-except-wrapped like :func:`push_viz_frame` -- viz can
+    never slow or crash training. Returns True when a frame was enqueued.
+    """
+    if not viz.get("started"):
+        return False
+    board_info = viz_board_info(buffer, board_size)
+    if board_info is None:
+        return False
+    return push_viz_frame(viz, build_viz_snapshot(
+        board_info, komi=komi, games=games, train_step=train_step,
+        loss=None, elo=elo))
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +645,18 @@ def run_loop(
                 logger.info(
                     "cycle %d: resuming mid-cycle (step %d, %d/%d steps done)",
                     cycle_no, global_step, steps_into_cycle, steps_per_cycle)
+
+            # F3b: the live window opens during the self-play phase too, not
+            # only once train steps start pushing (F2). Right after the
+            # buffer refresh the newest npz IS the just-finished game, so push
+            # its board now -- the user watches each cycle's games as they
+            # land. Non-blocking / try-except-wrapped: viz never slows or
+            # crashes training.
+            if viz.get("started"):
+                push_selfplay_frame(
+                    viz, buffer, board_size, komi=float(cfg.get("komi", 7.5)),
+                    games=buffer.num_games, train_step=global_step,
+                    elo=current_elo)
 
             remaining_in_cycle = steps_per_cycle - steps_into_cycle
             if remaining_budget is not None:

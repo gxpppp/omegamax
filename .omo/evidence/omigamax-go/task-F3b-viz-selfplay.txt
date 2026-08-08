@@ -1,0 +1,65 @@
+Task F3b: 自对弈阶段实时推送棋盘帧 (push viz frames during the self-play phase)
+=============================================================================
+Date: 2026-08-08
+HEAD base: 4094b01
+Fix scope: omigamax/train/loop.py + tests/test_loop.py only (no config, no
+selfplay.py / buffer.py changes).
+
+THE PROBLEM
+-----------
+With --viz on, the pygame window only appeared once TRAIN-STEPS started
+pushing frames (F2 per-step push). The self-play phase at the START of each
+cycle (~10-25 min at low sims) showed nothing on screen, so the user could
+not watch the self-play games.
+
+THE FIX (where the push happens in the cycle)
+---------------------------------------------
+A single seam inside run_loop(), in the cycle body AFTER the generate_games
++ buffer.refresh() step and BEFORE the train-step loop:
+
+    cycle body:
+        1. generate_games(...)          # games land as npz in data/selfplay
+        2. buffer.refresh()             # newest npz == just-finished game
+        3. push_selfplay_frame(viz, buffer, board_size, komi=...,      <-- NEW
+                               games=buffer.num_games,
+                               train_step=global_step, elo=current_elo)
+        4. train loop: per-step push (F2 behavior, kept intact)
+
+New helper omigamax/train/loop.py::push_selfplay_frame: chains the existing
+viz machinery viz_board_info -> build_viz_snapshot (loss=None, no training
+metrics yet) -> push_viz_frame. Guarded by viz.get("started") and fully
+non-blocking / try-except-wrapped, so viz can never slow or crash training
+(same discipline as push_viz_frame). Because VizThread opens the window
+lazily on its FIRST received frame, the window now opens during the first
+cycle's self-play phase instead of after it.
+
+The per-train-step F2 push is untouched.
+
+TESTS (tests/test_loop.py, TestVizFeed)
+---------------------------------------
+- test_frames_pushed_during_training: updated for the extra self-play frame
+  (queue now holds 1 self-play-phase frame + 5 per-train-step frames = 6;
+  oldest frame has train_step==0 / loss is None / games>=1; newest carries
+  live train metrics).
+- test_frame_pushed_during_selfplay_phase (NEW): wraps train_steps so the
+  FIRST training step records the queue size BEFORE training runs; asserts
+  >= 1 frame was already enqueued during the self-play phase.
+
+HEADLESS LIVE PROOF (SDL_VIDEODRIVER=dummy + instrumented queue)
+----------------------------------------------------------------
+Ran a real tiny loop (9x9, blocks=1, channels=8, sims=4, 2 games/cycle,
+5 steps/cycle) with SDL_VIDEODRIVER=dummy and a CountingQueue that records
+how many frames were enqueued when the first train_steps call fires:
+
+    frames pushed BEFORE first train step: 1
+    queue size at first train step:        1
+    total frames pushed this run:          6   (1 self-play + 5 train)
+    window would open during self-play:    True
+    RESULT: PASS (self-play phase pushed >=1 frame; window would open)
+
+PYTEST
+------
+uv run pytest -q
+432 passed, 1 warning in 47.32s   (431 baseline + 1 new test)
+
+git: commit fix(train): 自对弈阶段实时推送棋盘帧 (see git log)

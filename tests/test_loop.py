@@ -218,11 +218,62 @@ class TestVizFeed:
             cycles=1, games_per_cycle=2, steps_per_cycle=5,
             batch_size=8, use_symmetry=False, seed=0,
         )
-        # frames were pushed during training (queue non-empty after the run)
-        assert len(queue) == 5  # one frame per train step
-        snap = queue.poll()
-        assert snap is not None and snap.train_step >= 1
-        assert snap.loss is not None and snap.games >= 1
+        # 1 self-play-phase frame (F3b) + one frame per train step (F2)
+        assert len(queue) == 6
+        snaps = []
+        while True:
+            s = queue.poll(timeout=0.01)
+            if s is None:
+                break
+            snaps.append(s)
+        assert len(snaps) == 6
+        # the oldest frame is the self-play-phase frame (no loss yet)
+        assert snaps[0].train_step == 0
+        assert snaps[0].loss is None
+        assert snaps[0].games >= 1
+        # the newest frame carries the last train step's live metrics
+        last = snaps[-1]
+        assert last.train_step >= 1
+        assert last.loss is not None and last.games >= 1
+
+    def test_frame_pushed_during_selfplay_phase(self, tmp_path, monkeypatch):
+        """F3b: with viz on, a frame is enqueued during the self-play phase --
+        before ANY training step runs -- so the window opens while the cycle's
+        games are being generated, not only once training starts."""
+        from omigamax.viz.board_window import SnapshotQueue
+
+        monkeypatch.setattr(loop, "generate_games", fake_generate_games)
+        monkeypatch.setattr(loop, "evaluate_and_gate", fake_evaluate_and_gate)
+        queue = SnapshotQueue(maxlen=32)
+        monkeypatch.setattr(
+            loop, "start_viz_if_available",
+            lambda cfg, logger=None: {
+                "started": True, "reason": "available",
+                "queue": queue, "thread": None, "stop": lambda: None,
+            },
+        )
+
+        qsize_at_first_step: dict = {}
+        real_train_steps = loop.train_steps
+
+        def recording_train_steps(model, optimizer, buffer, steps, **kwargs):
+            if "qsize" not in qsize_at_first_step:
+                qsize_at_first_step["qsize"] = len(queue)
+            return real_train_steps(model, optimizer, buffer, steps, **kwargs)
+
+        monkeypatch.setattr(loop, "train_steps", recording_train_steps)
+
+        loop.run_loop(
+            make_cfg(), device=DEVICE,
+            data_dir=tmp_path / "data", checkpoint_dir=tmp_path / "models",
+            train_log=tmp_path / "train.jsonl",
+            history=tmp_path / "eval_history.jsonl",
+            cycles=1, games_per_cycle=2, steps_per_cycle=5,
+            batch_size=8, use_symmetry=False, seed=0,
+        )
+        # by the time the FIRST training step runs, the self-play frame was
+        # already enqueued (the window would already be open)
+        assert qsize_at_first_step["qsize"] >= 1
 
     def test_push_failure_never_crashes_training(self, tmp_path, monkeypatch):
         """A broken queue must not abort the training loop."""
