@@ -1,0 +1,110 @@
+P8: 验收评估工具（代码部分）— evidence / tools + tests
+========================================================
+date      : 2026-08-08
+base      : HEAD 0d60547
+GPU       : BUSY (P6 detached pretraining, batch 64, b20c256 on RTX 3060)
+            -> all P8 work CPU-only; real acceptance eval deferred.
+
+deliverable: omigamax/cli/evaluate.py  (3 modes + report writer)
+
+Design
+------
+All modes load the net via train.load_checkpoint with the ARCH READ FROM THE
+CHECKPOINT (models/pretrain.pt restores b20c256 regardless of config), put the
+net in eval() mode, and run inference under torch.no_grad -- nothing trains.
+
+1. human-match -- SL accuracy on a held-out eval set.
+   Eval set: sampled ON THE FLY from data/pretrain/chunk_*.npz (13 chunks,
+   5,122,072 samples) with the fixed eval seed 0x5EED (24237), deliberately
+   distinct from the P5 training seeds (0/..). Reuses the exact PretrainChunks
+   memory-mapped loader + uniform sample_batch from omigamax/train/pretrain.py
+   WITHOUT training -- just iterate. No files written under data/pretrain.
+   Reports top-1 (argmax == human move), top-5, policy CE, value MSE and the
+   Pearson correlation between z and tanh(value) -- plus the SAME metrics for
+   a uniform-policy RANDOM baseline (the "untrained floor": empirical top-1
+   ~1/362, top-5 ~5/362, exact CE = ln(362), MSE = mean(z^2), corr 0).
+   CPU-safe default: --samples 20000.
+
+2. bench -- N MCTS games checkpoint vs baseline (or --opponent checkpoint).
+   Reuses omigamax/train/evaluate.play_eval_game (the todo-15 gate engine:
+   no Dirichlet root noise, tau=0 argmax, batched no_grad inference). The
+   self-play generate_games path plays ONE net on both sides, so a two-net
+   match must go through play_eval_game. Default opponent: a random-init
+   create_model(blocks, channels, board) of the checkpoint's own arch = the
+   "before training" baseline. Colours alternate (checkpoint black on even
+   games, white on odd; komi 7.5 favours white). Default N=10, sims=150
+   (plan: 100-200, CPU-feasible). Reports win rate each side, draws, avg
+   game length.
+
+3. report -- combined human-readable summary of both modes' JSON evidence
+   into .omo/evidence/omigamax-go/task-P8-eval.txt (--report overrides).
+
+CLI (mirrors pretrain.py's argparse style; config/default.yaml read, never
+modified):
+    uv run python -m omigamax.cli.evaluate human-match \
+        --checkpoint models/pretrain.pt --samples 20000
+    uv run python -m omigamax.cli.evaluate bench \
+        --checkpoint models/pretrain.pt --games 10 --sims 150
+    uv run python -m omigamax.cli.evaluate report
+Checkpoint default: models/latest.pt (latest_checkpoint_path()).
+
+Tests (tests/test_evaluate.py -- appended under TestP8HumanMatch /
+TestP8Bench / TestP8Report; CPU-only):
+  (a) test_tiny_run_metrics_sane_and_deterministic -- 9x9 net (blocks 1,
+      channels 8) + tiny synthetic chunk corpus (2x40); run_human_match twice
+      under one seed -> identical metrics, top-1/top-5 in [0,1], CE/MSE/Pearson
+      finite, arch round-trips.
+  (b) test_random_baseline_19x19_top1_about_1_over_362 -- on the real 19x19
+      geometry (D=362): top-1 ~ 1/362 within 0.01, top-5 ~ 5/362 within 0.02,
+      CE = ln(362), value MSE = 1 (z in +-1).
+  (c) test_tiny_bench_end_to_end_winrate_dict -- bench with tiny config
+      (9x9, blocks 1, channels 8, 50 sims, 2 games, random-init baseline)
+      runs end-to-end and returns a win-rate dict with consistent
+      a_wins+b_wins+draws == games, per-game records sane.
+  (d) test_report_writer_creates_file -- write_report creates the file with
+      both modes' numbers.
+
+  NOTE: the pre-existing TestEvaluateAndGate::test_read_last_elo_empty_and_
+  after_append had its final assertion orphaned to the end of the new P8
+  report test (the added block was inserted mid-method by the first pass,
+  leaving `assert ev.read_last_elo(hp) == 7.25` in a method where `hp` is
+  undefined -> NameError). Fixed: assertion restored to its original method,
+  orphaned line removed.
+
+Result
+------
+uv run pytest tests/test_evaluate.py -q  -> 25 passed (0:01:30)
+uv run pytest -q                          -> 466 passed (462 pre-existing
+   + 4 new P8 tests), 1 pygame deprecation warning (pre-existing).
+
+CPU smoke (all exit 0; evidence written):
+  * bench  (tiny 9x9 fixture): 2 games @ 50 sims, komi 7.5, colors
+    alternating -> checkpoint 1-1-0 = 50% vs random-init baseline,
+    avg 100 moves, 50.0s.
+  * human-match (REAL models/pretrain.pt arch 20/256/19, step 200, REAL
+    data/pretrain): --samples 500, seed 24237 -> top-1 0.00%,
+    top-5 3.20%, policy CE 5.8267, value MSE 1.0047, corr +0.090
+    (random floor top-1 0.40%). Honest weak signal at step 200 -- the
+    pretrain run is only 200 steps in (P6 still running); numbers are
+    not the acceptance verdict.
+  * report: task-P8-eval.txt created from both JSONs.
+
+Real acceptance eval on the trained checkpoint is DEFERRED until P6
+finishes and the GPU is free. P8 ships the tooling + CPU-verified tests
+so the acceptance run is one command away.
+
+Fixes applied to the prior in-progress draft
+-------------------------------------------
+  * omigamax/cli/evaluate.py main(): device was resolved from
+    args.device BEFORE command dispatch, but the report subparser has no
+    --device -> AttributeError on every report run. Now getattr-based.
+  * tests/test_evaluate.py: orphaned final assertion (see above).
+No changes to omigamax/ existing modules, config/default.yaml, or
+data/pretrain (eval set sampled on the fly; smoke fixtures live under
+the OS temp dir, not the repo).
+
+Files
+-----
+  omigamax/cli/evaluate.py          (new; CLI + modes + report writer)
+  tests/test_evaluate.py            (+4 P8 test methods, 1 assertion fix)
+  .omo/evidence/omigamax-go/task-P8-eval.txt   (report-mode output path)

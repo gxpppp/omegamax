@@ -257,3 +257,141 @@ class TestEvaluateAndGate:
         assert ev.read_last_elo(hp) == 12.5
         ev.append_eval_history({"event": "x", "elo": 7.25}, hp)
         assert ev.read_last_elo(hp) == 7.25
+
+
+# ---------------------------------------------------------------------------
+# P8: acceptance-evaluation CLI (omigamax/cli/evaluate.py) -- CPU-only.
+# (a) human-match on a tiny 9x9 model + tiny synthetic chunk -> metrics sane
+#     and deterministic under a fixed seed;
+# (b) random baseline on the real 19x19 geometry -> top-1 ~ 1/362;
+# (c) bench with a tiny config runs end-to-end and returns a win-rate dict;
+# (d) the report writer creates the file.
+# ---------------------------------------------------------------------------
+
+import math as _math
+from pathlib import Path
+
+import numpy as _np
+
+from omigamax.cli import evaluate as p8
+from omigamax.train.pretrain import (
+    PretrainChunks,
+    make_pretrain_optimizer,
+    save_pretrain_checkpoint,
+)
+
+CPU = torch.device("cpu")
+
+
+def _p8_synthetic_chunks(dir_path, board, sizes, seed=0):
+    """Write tiny valid ``chunk_%04d.npz`` SL samples (test_pretrain-style)."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    rng = _np.random.default_rng(seed)
+    for i, n in enumerate(sizes):
+        s = rng.integers(0, 2, size=(n, 17, board, board)).astype(_np.uint8)
+        pi = rng.integers(0, board * board + 1, size=n).astype(_np.uint16)
+        z = rng.choice(_np.array([-1, 1], dtype=_np.int8), size=n)
+        _np.savez(dir_path / f"chunk_{i:04d}.npz", s=s, pi=pi, z=z)
+    return dir_path
+
+
+def _p8_tiny_checkpoint(path, board, blocks=1, channels=8, seed=0):
+    torch.manual_seed(seed)
+    model = create_model(blocks, channels, board)
+    optimizer = make_pretrain_optimizer(model, lr=0.02, momentum=0.9, l2=1e-4)
+    save_pretrain_checkpoint(
+        path, model, optimizer, global_step=0,
+        rng=_np.random.default_rng(seed),
+        config={"blocks": blocks, "channels": channels, "board_size": board},
+    )
+    return path
+
+
+class TestP8HumanMatch:
+    def test_tiny_run_metrics_sane_and_deterministic(self, tmp_path):
+        board = 9
+        ckpt = _p8_tiny_checkpoint(tmp_path / "tiny.pt", board)
+        data_dir = _p8_synthetic_chunks(tmp_path / "data", board, sizes=[40, 40])
+        r1 = p8.run_human_match(ckpt, data_dir, samples=32, seed=12345,
+                                device=CPU)
+        r2 = p8.run_human_match(ckpt, data_dir, samples=32, seed=12345,
+                                device=CPU)
+        m = r1["model"]
+        # deterministic under a fixed seed
+        assert m == r2["model"]
+        assert r1["eval_samples"] == 32 and m["n"] == 32
+        assert 0.0 <= m["top1"] <= 1.0
+        assert 0.0 <= m["top5"] <= 1.0
+        assert m["top5"] >= m["top1"]
+        assert all(_math.isfinite(m[k]) for k in
+                   ("top1", "top5", "policy_ce", "value_mse", "pearson"))
+        assert r1["arch"] == {"blocks": 1, "channels": 8, "board_size": board}
+        # the random floor is reported alongside
+        assert 0.0 <= r1["random_baseline"]["top1"] <= 1.0
+
+    def test_random_baseline_19x19_top1_about_1_over_362(self, tmp_path):
+        board = 19
+        data_dir = _p8_synthetic_chunks(tmp_path / "data", board, sizes=[2000])
+        with PretrainChunks(data_dir) as chunks:
+            batch = chunks.sample_batch(_np.random.default_rng(0), 2000)
+        base = p8.random_baseline(batch, seed=99)
+        assert base["D"] == 362
+        assert abs(base["top1"] - 1.0 / 362.0) < 0.01
+        assert abs(base["top5"] - 5.0 / 362.0) < 0.02
+        assert base["policy_ce"] == pytest.approx(_math.log(362), rel=1e-6)
+        assert base["value_mse"] == pytest.approx(1.0, abs=1e-6)  # z in +-1
+
+
+class TestP8Bench:
+    def test_tiny_bench_end_to_end_winrate_dict(self, tmp_path):
+        board = 9
+        ckpt = _p8_tiny_checkpoint(tmp_path / "a.pt", board)
+        cfg = {"komi": 7.5, "virtual_loss": 3}
+        rep = p8.run_bench(
+            ckpt, None, cfg,
+            games=2, sims=50, size=None, komi=None, virtual_loss=None,
+            max_moves=200, seed=7, device=CPU,
+        )
+        assert rep["games"] == 2 and rep["sims"] == 50
+        assert rep["board_size"] == board and rep["komi"] == 7.5
+        assert 0 <= rep["a_wins"] <= 2
+        assert rep["a_wins"] + rep["b_wins"] + rep["draws"] == 2
+        assert 0.0 <= rep["winrate_a"] <= 1.0
+        assert rep["winrate_a"] + rep["winrate_b"] + \
+            rep["draws"] / rep["games"] == pytest.approx(1.0)
+        assert rep["avg_game_length"] > 0
+        assert rep["opponent"]["checkpoint"] is None  # random-init baseline
+        assert len(rep["games_detail"]) == 2
+        for rec in rep["games_detail"]:
+            assert rec["winner"] in ("B", "W", None)
+            assert rec["moves"] > 0
+
+
+class TestP8Report:
+    def test_report_writer_creates_file(self, tmp_path):
+        human = {
+            "mode": "human-match", "checkpoint": "models/pretrain.pt",
+            "arch": {"blocks": 1, "channels": 8, "board_size": 9},
+            "eval_samples": 4, "data_dir": "data/pretrain", "eval_seed": 1,
+            "model": {"n": 4, "top1": 0.25, "top5": 0.5, "policy_ce": 2.3,
+                      "value_mse": 0.9, "pearson": 0.1},
+            "random_baseline": {"n": 4, "D": 82, "top1": 0.0122,
+                                "top5": 0.06, "policy_ce": 4.4,
+                                "value_mse": 1.0, "pearson": 0.0},
+        }
+        bench = {
+            "mode": "bench", "checkpoint": "models/pretrain.pt",
+            "games": 2, "a_wins": 1, "b_wins": 1, "draws": 0,
+            "winrate_a": 0.5, "winrate_b": 0.5,
+            "avg_game_length": 120.0, "sims": 50, "board_size": 9,
+            "komi": 7.5, "virtual_loss": 3,
+            "opponent": {"checkpoint": None, "note": "random-init baseline"},
+        }
+        out = tmp_path / "report.txt"
+        path = p8.write_report(out, human, bench)
+        text = Path(path).read_text(encoding="utf-8")
+        assert Path(path).exists()
+        assert "human-match" in text
+        assert "bench" in text
+        assert "top-1" in text and "win rate" in text
+        assert len(text.strip()) > 50
