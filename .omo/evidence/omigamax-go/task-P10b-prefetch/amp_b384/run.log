@@ -1,0 +1,15 @@
+====================================================================
+P5 supervised pretraining smoke
+  device        : cuda  (NVIDIA GeForce RTX 3060 Laptop GPU)
+  arch          : blocks=20 channels=256 board=19 params=23,962,085
+  data          : 5,122,072 positions across 13 chunks
+  steps         : 30 (global_step 30)
+  batch size    : 384   lr 0.02  grad_clip 1.0  amp on
+  loss first    : total 7.8920 policy 6.7164 value 1.1756 top1 0.26%
+  loss last     : total 7.2570 policy 6.2464 value 1.0106 top1 0.78%
+  loss ratio    : 0.920
+  speed         : 12746.7 ms/step (382.4s / 30 steps)
+  peak gpu mem  : 5.890 GB (budget 5.5 GB, OVER)
+  checkpoint    : C:\Users\Administrator\AppData\Local\Temp\opencode\p10b\amp_b384\pretrain.pt (global_step 30)
+  jsonl log     : C:\Users\Administrator\AppData\Local\Temp\opencode\p10b\amp_b384\run.jsonl
+====================================================================

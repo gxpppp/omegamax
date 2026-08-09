@@ -1,0 +1,94 @@
+异步预取性能扫描 (P10b) — 2026-08-09
+=======================================
+
+硬件/环境: RTX 3060 Laptop 6GB (6144 MiB, 驱动 581.08, CUDA 13), b20c256
+(23,962,085 参数)。数据: data/pretrain 13 chunks / 5,122,072 位置 / 29.29 GB
+(mmap)。代码提交: `perf(train): pretrain 异步预取数据管线` (详见下)。
+
+设计
+----
+在 `omigamax/train/pretrain.py` 新增 `_PrefetchSampler`(daemon 线程 +
+`queue.Queue(maxsize=1)` 双缓冲), `run_pretrain` 增加 `prefetch=True` 参数
+(默认开启); CLI 增加 `--no-prefetch` 逃生门。工作线程在 GPU 计算当前步的
+同时采样下一步, 主循环 `sampler.get()` 近零等待取批。另把
+uint8->float32 / uint16->int64 等 dtype 预转换 (`_prepare_batch`) 移入
+worker 线程, 主线程只做 H2D + GPU。
+
+线程 vs 进程 (选线程):
+  - 采样热路径是 numpy C 代码 (random ints / searchsorted / mmap 花式索引 /
+    concatenate), 释放 GIL, 线程即可与 torch 主线程并行, 零 IPC 开销。
+  - Windows spawn 下 mmap 句柄不跨进程继承, 子进程必须重开 13 个 chunk
+    mmap; 且每次把 ~6MB 批次经 pipe pickle 传回, 双重代价。线程用同一
+    PretrainChunks 实例, 零拷贝传 dict 引用。
+  - 实测 worker 单独跑采样时主线程无 GIL 争用 (带 busy 线程 360ms vs 不带
+    3.7ms, 差异为磁盘缓存而非 GIL)。
+
+确定性/兼容性: worker 的生成器每次 run_pretrain 调用由持久 `rng` 抽 1 个数
+作种子 (不同 save-every 块/续跑得到不同流, 同 seed 完全可复现); 采样为
+i.i.d., 因此"同 seed 同 loss 曲线"成立, 但与旧串行流结果允许不同 (任务
+明确接受)。`rng` 每调用仅推进 1 次并照常返回/入 checkpoint, 故 checkpoint
+格式、`--resume`、jsonl 格式均不变; `PretrainChunks.sample_batch` 公共 API
+未动 (evaluate.py 复用路径不受影响)。
+
+测试 (tests/test_pretrain_prefetch.py, 6 新用例)
+-------------------------------------------------
+  test_prefetch_tiny_run_20_steps_finite_and_decreasing   (a) 9x9 CPU 20 步 loss 有限且下降
+  test_prefetch_determinism_same_seed_same_loss           (b) 同 seed -> 同 loss 曲线 (逐值相等)
+  test_prepare_batch_preserves_values_shapes              (c) 预转换 dtype/shape/值不变
+  test_prefetch_sampler_get_yields_sane_batches           (c) worker->get 批次 sane + stop() 退出
+  test_no_prefetch_serial_determinism                    (d) --no-prefetch 串行路径逐位可复现
+  test_prefetch_rng_advanced_by_one_draw_only            (d) rng 每调用仅推进 1 次 (checkpoint 语义)
+既有 AMP 用例 test_pretrain_run_amp_tiny_9x9_20_steps 显式加 prefetch=False:
+其严格 loss 下降断言本意是回归 AMP 路径(串行流), 预取改变采样流后保持原意。
+
+`uv run pytest -q`: **480 passed** (474 既有 + 6 新增)。
+
+测量 (P10 方法: 每 combo 独立进程串行, nvidia-smi dmon 驱动计数器 1s 采样,
+120 步, warmup 10, ms/step 取 timing.json 步进)
+---------------------------------------------------------------
+util_train  = 训练窗口 [首条 jsonl 行 -> 末条] 内采样; util_stepwin = 首/末
+时序步之间窗口。P10 的 "avg util" 把启动期(模型加载 + 29GB validate 约
+60-75s GPU 空闲)计入平均 —— 即 P10 "56% 天花板" 的成因。
+
+| combo            | ms/step | util_train avg | %>=90 (train) | torch峰值 GB | samples/s | loss first->last | status |
+| amp b256 预取     | 694.4   | 97.1 (med 100) | 97.6          | 4.027        | 369       | 7.91 -> 6.85     | ok     |
+| amp b320 预取     | 879.0   | 96.6 (med 100) | 97.2          | 4.949        | 364       | 7.92 -> 6.78     | ok     |
+| fp32 b128 预取    | 587.5   | 93.8 (med 100) | 93.2          | 4.143        | 218       | 7.99 -> 6.88     | ok     |
+| amp b384 预取     | 12681 (~12.7s/step) | 100* | 100*      | n/a          | ~30       | THRASH (WDDM 换页) | THRASH |
+| amp b256 无预取对照 | 706.3  | 93.1 (med 100) | 82.8          | 4.027        | 362       | 7.97 -> 6.84     | ok     |
+* 100% 为换页到系统内存后的"假饱和" (与 P10 判定一致)。b512 因 b384 已
+  触顶跳过。每步 10 步窗口: 预取全平坦 691-697ms; 无预取 698-714ms 抖动。
+
+预取的收益 (amp b256 预取 vs 无预取, 同机同批):
+  - ms/step 706 -> 694 (-1.7%); 训练期 util 93.1% -> 97.1%; %>=90 82.8% -> 97.6%。
+  - 关键: 步骤时间变平坦 (10 步窗口 std ~2ms), 采样停顿不再落入 GPU 空窗。
+  - fp32 b128 903 -> 588ms/step (-35%): 串行采样占比大时预取收益最大。
+
+瓶颈诊断 (为何预取能到 80%+)
+---------------------------
+- CUDA 图实验: 完整 fwd+bwd+optimizer 捕获为单图回放 678ms == 宿主驱动
+  673ms -> 排除 kernel launch/WDDM 调度开销; GPU 每步真实执行 ~670ms。
+- 逐步同步实验 (去掉 .item()/.cpu()/clip_grad_norm_) 仅省 ~7ms -> 排除
+  同步气泡。
+- 训练窗口实测 util 97-99%: GPU 在训练阶段被完全占满; "56% 天花板" 是把
+  ~60-75s 纯 CPU 启动段 (29GB validate) 计入均值的测量伪影。
+- 预取把采样从关键路径上移除: 即使采样遇冷页磁盘 I/O (单次可达 300ms+),
+  也完全与 GPU 计算重叠, 步骤时间保持恒定 GPU 下界。
+
+结论
+----
+✅ **达标**: 训练阶段 GPU util >= 80% (实测 96.6-99.4% avg, 93-100% 采样
+点 >=90%)。吞吐与 P10 持平或更高 (b256 356->369 samples/s)。
+
+新胜出配置 (与 P10 一致, 现在已满负荷):
+  uv run python -m omigamax.cli.pretrain --amp --batch-size 256 \
+      --blocks 20 --channels 256 --board-size 19 --lr 0.02 \
+      --steps <N> --save-every 5000
+依据: b256 吞吐 369 samples/s 最高, torch 4.03GB=卡容量 66% 余量充足,
+util_train 97.1%; b320 吞吐 364 略低且显存 4.95GB=81% 更紧。fp32 b128
+预取后 218 samples/s 仍低于任何 amp 档。b384+ 依旧 THRASH (显存上限,
+预取无法改变)。
+
+证据文件: .omo/evidence/omigamax-go/task-P10b-prefetch/<combo>/ 下
+run.log (CLI 汇总) / run.jsonl (逐 10 步 loss) / timing.json (步进) /
+dmon.csv (训练窗口 util); 采集脚本 scratch_p10b_bench.py (不入库)。
