@@ -121,19 +121,26 @@ class Board:
             return False
         return not is_ko_prohibited(self.last_captured_point, move)
 
-    def play(self, move, color):
+    def play(self, move, color, check_legal: bool = True):
         """Place a stone (or pass) and remove captured opponent stones.
 
         Returns the number of stones captured (0 for a pass or a
         non-capturing move). Raises :class:`IllegalMoveError` if ``move`` is
         not legal; the board is left unchanged in that case.
+
+        ``check_legal=True`` (default) verifies legality first. Pass
+        ``check_legal=False`` to skip the re-check when the caller already
+        knows the move is legal (MCTS expansion builds children from
+        ``node.legal_moves``, which were vetted by ``legal_actions`` -- the
+        re-check doubles the per-child legality work on the hot path, P11
+        self-play speedup). The caller guarantees legality in that case.
         """
         if move is None:
             self.moves.append((None, color))
             self.pass_count += 1
             self.last_captured_point = None
             return 0
-        if not self.is_legal(move, color):
+        if check_legal and not self.is_legal(move, color):
             raise IllegalMoveError(
                 f"illegal move {move} for color {color}"
             )

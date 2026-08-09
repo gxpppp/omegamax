@@ -110,6 +110,7 @@ DEFAULT_TRAIN_LOG = "logs/train.jsonl"
 DEFAULT_HISTORY = "logs/eval_history.jsonl"
 DEFAULT_EVIDENCE = ".omo/evidence/omigamax-go/task-16-loop.json"
 DEFAULT_EVAL_MAX_MOVES = 1000
+DEFAULT_PRETRAIN_DATA_DIR = Path("data") / "pretrain"
 
 # --smoke low-config preset (plan: sims=40, batch=32, ~100-games scale; the
 # acceptance demo runs a smaller slice so one full cycle + gate completes in
@@ -637,6 +638,10 @@ def run_loop(
     viz_enabled: "bool | None" = None,
     logger=None,
     interrupt_after: "int | None" = None,
+    human_mix: float = 0.0,
+    pretrain_data_dir: "str | Path" = DEFAULT_PRETRAIN_DATA_DIR,
+    leaf_batch: "int | None" = None,
+    selfplay_fp16: bool = False,
 ) -> dict:
     """Run the self-play -> train -> eval-gate loop (interruptible, resumable).
 
@@ -719,6 +724,31 @@ def run_loop(
     board_size = int(model.board_size)
 
     buffer = ReplayBuffer(data_dir, max_games=keep_games, board_size=board_size)
+
+    # P11 human-data mixing: when enabled, each training batch blends
+    # ``human_mix``-fraction human positions (sampled uniformly from the
+    # data/pretrain chunk corpus) with self-play positions. The sampler draws
+    # from the SAME persistent ``rng`` as the replay buffer, so deterministic
+    # resume needs no new checkpoint state (the persisted ``rng_state`` covers
+    # both streams). Read-only mmap handles are closed when the run ends.
+    human_sampler = None
+    human_chunks = None
+    mix = float(human_mix)
+    if mix > 0.0:
+        from omigamax.train.pretrain import PretrainChunks, make_human_sampler
+        human_chunks = PretrainChunks(pretrain_data_dir)
+        if int(human_chunks.board_size) != int(board_size):
+            human_chunks.close()
+            raise ValueError(
+                f"human-mix chunk corpus is {human_chunks.board_size} but the "
+                f"model is {board_size} -- cannot mix boards of different sizes"
+            )
+        human_sampler = make_human_sampler(human_chunks)
+        logger.info(
+            "human-mix enabled: mix=%.3f corpus=%s (board %dx%d)",
+            mix, human_chunks.data_dir, human_chunks.board_size,
+            human_chunks.board_size,
+        )
 
     current_elo = read_last_elo(history)
     viz = start_viz_if_available(
@@ -849,7 +879,8 @@ def run_loop(
                         model, cfg, games=1, data_dir=data_dir,
                         keep=keep_games, seed=int(seed) + games_generated,
                         simulations=simulations, max_moves=selfplay_max_moves,
-                        size=board_size, frame_callback=_per_move_frame)
+                        size=board_size, frame_callback=_per_move_frame,
+                        leaf_batch=leaf_batch, fp16=selfplay_fp16)
                     games_generated += 1
                     buffer.refresh()
                     if viz.get("started"):
@@ -885,7 +916,8 @@ def run_loop(
                             keep=keep_games, seed=int(seed) + games_generated,
                             simulations=simulations,
                             max_moves=selfplay_max_moves,
-                            size=board_size, frame_callback=_per_move_frame)
+                            size=board_size, frame_callback=_per_move_frame,
+                            leaf_batch=leaf_batch, fp16=selfplay_fp16)
                         games_generated += 1
                         buffer.refresh()
                         if viz.get("started"):
@@ -927,7 +959,8 @@ def run_loop(
                     global_step=global_step, batch_size=batch_size,
                     device=device, use_fp16=use_fp16, grad_clip=grad_clip,
                     symmetry=use_symmetry, lr_base=lr_base,
-                    schedule_steps=schedule_steps)
+                    schedule_steps=schedule_steps,
+                    human_sampler=human_sampler, human_mix=mix)
                 loss = float(losses[0])
                 lr = float(lrs[0])
                 if loss_first is None:
@@ -999,6 +1032,14 @@ def run_loop(
         except Exception:  # pragma: no cover - defensive
             logger.warning("viz stop raised (ignored)", exc_info=True)
 
+    # P11: release the human-chunk mmap handles (idempotent; only open when
+    # human-mix was enabled).
+    if human_chunks is not None:
+        try:
+            human_chunks.close()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("human-chunk close raised (ignored)", exc_info=True)
+
     return {
         "todo": 16,
         "device": str(device),
@@ -1019,6 +1060,12 @@ def run_loop(
                 else cfg.get("replace_threshold", 0.55)),
             "symmetry_aug": use_symmetry,
             "fp16": use_fp16,
+            "human_mix": mix,
+            "pretrain_data_dir": str(pretrain_data_dir),
+            "leaf_batch": (
+                int(leaf_batch) if leaf_batch is not None
+                else int(cfg.get("leaf_batch", 16))),
+            "selfplay_fp16": bool(selfplay_fp16),
             "grad_clip": grad_clip,
             "seed": int(seed),
             "resume": bool(resume),
@@ -1142,6 +1189,22 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="exercise the FP16 (autocast) toggle")
     parser.add_argument("--grad-clip", type=float, default=None,
                         help=f"gradient-norm clip (default {DEFAULT_GRAD_CLIP})")
+    parser.add_argument("--human-mix", type=float, default=0.0,
+                        help="fraction of each training batch drawn from the "
+                             "human data/pretrain chunk corpus (KataGo-style "
+                             "human-data mixing; default 0.0 = pure self-play, "
+                             "byte-identical to the pre-P11 behavior)")
+    parser.add_argument("--pretrain-data-dir", type=str,
+                        default=str(DEFAULT_PRETRAIN_DATA_DIR),
+                        help=f"human chunk corpus dir for --human-mix "
+                             f"(default {DEFAULT_PRETRAIN_DATA_DIR}; read-only)")
+    parser.add_argument("--leaf-batch", type=int, default=None,
+                        help="self-play leaves per network forward (default: "
+                             "config leaf_batch=16; P11 speedup knob)")
+    parser.add_argument("--selfplay-fp16", action="store_true",
+                        help="run self-play leaf inference under fp16 "
+                             "autocast on CUDA (move numerics may shift "
+                             "slightly but games stay legal)")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (default 0)")
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
@@ -1227,6 +1290,10 @@ def main(argv: "list[str] | None" = None) -> int:
             force_final_eval=bool(args.smoke),
             viz_enabled=viz_enabled,
             interrupt_after=args.interrupt_at_steps,
+            human_mix=args.human_mix,
+            pretrain_data_dir=args.pretrain_data_dir,
+            leaf_batch=args.leaf_batch,
+            selfplay_fp16=args.selfplay_fp16,
         )
     except KeyboardInterrupt:
         # Interrupt landed outside run_loop's protected region (model load,

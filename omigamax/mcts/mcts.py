@@ -344,7 +344,11 @@ def expand(node: Node, prior_probs: np.ndarray) -> None:
             child_board.pass_move(color)
         else:
             row, col = index_to_point(action, size)
-            child_board.play((row, col), color)
+            # The action came from node.legal_moves (vetted by legal_actions,
+            # which includes simple-ko), so the child build skips the legality
+            # re-check -- the hot-path cost of doubling is_legal+is_ko per
+            # child (P11 self-play speedup).
+            child_board.play((row, col), color, check_legal=False)
         node.children[action] = Node(
             board=child_board,
             prior=float(prior_probs[action]),
@@ -403,7 +407,8 @@ class NetworkEvaluator:
         x = torch.from_numpy(features).unsqueeze(0).to(device)
         with torch.no_grad():
             logits, value = self.network(x)
-        prior = decode_policy(logits, node.board, color=node.color)
+        prior = decode_policy(logits, node.board, color=node.color,
+                              legal_moves=node.legal_moves)
         return prior, float(value.reshape(-1)[0].item())
 
 
@@ -839,12 +844,14 @@ class MCTS:
         dirichlet_eps: float | None = None,
         dirichlet_rng: np.random.Generator | None = None,
         virtual_loss: int | None = None,
+        leaf_batch: "int | None" = None,
     ) -> None:
         cfg = load_config()
         self.network = network
         self.c_puct = float(c_puct) if c_puct is not None else float(cfg.get("c_puct", DEFAULT_C_PUCT))
         self.komi = float(komi) if komi is not None else float(cfg.get("komi", DEFAULT_KOMI))
         self.evaluator = evaluator
+        self.leaf_batch = int(leaf_batch) if leaf_batch is not None else None
         self.dirichlet_alpha = (
             float(dirichlet_alpha) if dirichlet_alpha is not None else None
         )
@@ -885,6 +892,7 @@ class MCTS:
             dirichlet_eps=self.dirichlet_eps,
             dirichlet_rng=self.dirichlet_rng,
             virtual_loss=self.virtual_loss,
+            batch_size=self.leaf_batch,
         )
 
     def policy(self) -> np.ndarray:

@@ -129,6 +129,11 @@ class PretrainChunks:
     def num_chunks(self) -> int:
         return len(self.sizes)
 
+    @property
+    def board_size(self) -> int:
+        """Board edge of the corpus (from the first chunk's ``s`` shape)."""
+        return int(self._get(0, "s").shape[2])
+
     # -- access ------------------------------------------------------------
 
     def _get(self, chunk_idx: int, key: str) -> np.ndarray:
@@ -197,6 +202,46 @@ class PretrainChunks:
                 "shape": tuple(s.shape),
             })
         return report
+
+
+# ---------------------------------------------------------------------------
+# human-mix bridge: PretrainChunks sample -> RL training-batch format
+# ---------------------------------------------------------------------------
+
+def convert_to_rl_batch(batch: dict) -> dict:
+    """Convert a :meth:`PretrainChunks.sample_batch` output to the RL format.
+
+    The chunk corpus stores ``s`` as uint8 ``(B, 17, N, N)`` 0/1 planes, ``pi``
+    as a uint16 *move index* ``0..N*N`` (``N*N`` = pass) and ``z`` as int8
+    ``(B,)`` +-1. The RL training path (``ReplayBuffer.sample`` +
+    ``train_steps``) expects ``s`` float32 ``(B, 17, N, N)``, ``pi`` one-hot
+    float32 ``(B, N*N+1)`` and ``z`` ``(B, 1)`` float32. This helper performs
+    exactly that conversion, value-preserving on ``s``/``z`` and expanding the
+    move index into a one-hot policy target (pass lands in the last slot, the
+    same convention as :func:`omigamax.mcts.mcts.pass_index`).
+    """
+    s = np.ascontiguousarray(batch["s"], dtype=np.float32)
+    n = int(s.shape[-1])
+    pi_idx = np.asarray(batch["pi"], dtype=np.int64)
+    pi = np.zeros((int(pi_idx.shape[0]), n * n + 1), dtype=np.float32)
+    pi[np.arange(pi_idx.shape[0]), pi_idx] = 1.0
+    z = np.ascontiguousarray(batch["z"], dtype=np.float32).reshape(-1, 1)
+    return {"s": s, "pi": pi, "z": z}
+
+
+def make_human_sampler(chunks: PretrainChunks):
+    """Build the ``human_sampler`` callable for ``train_steps``.
+
+    Returns ``callable(rng, n) -> dict`` with ``s``/``pi``/``z`` already in the
+    RL batch format (float32 / one-hot / ``(B,1)``) for ``n`` uniformly sampled
+    human positions. The caller's persistent ``rng`` drives the draw (exactly
+    like the replay buffer), so both streams advance the one checkpointed RNG
+    and deterministic resume stays exact with zero new checkpoint state.
+    """
+    def human_sampler(rng: np.random.Generator, n: int) -> dict:
+        raw = chunks.sample_batch(rng, int(n))
+        return convert_to_rl_batch(raw)
+    return human_sampler
 
 
 # ---------------------------------------------------------------------------

@@ -57,11 +57,13 @@ class BatchedNetworkEvaluator:
         leaves_evaluated: total leaves sent through ``flush()``.
     """
 
-    def __init__(self, network: torch.nn.Module, batch_size: int | None = None) -> None:
+    def __init__(self, network: torch.nn.Module, batch_size: int | None = None,
+                 fp16: bool = False) -> None:
         self.network = network
         if batch_size is None:
             batch_size = int(load_config().get("leaf_batch", DEFAULT_LEAF_BATCH))
         self.batch_size = max(1, int(batch_size))
+        self.fp16 = bool(fp16)
         self.pending: list["Node"] = []
         # -- instrumentation (asserted on by tests) --
         self.batch_sizes: list[int] = []
@@ -116,14 +118,26 @@ class BatchedNetworkEvaluator:
             board_size=board_size,
         )
         x = torch.from_numpy(features).to(device)
-        with torch.no_grad():
+        use_fp16 = self.fp16 and device.type == "cuda"
+        if use_fp16:
+            ctx = torch.autocast("cuda", dtype=torch.float16)
+        else:
+            ctx = torch.autocast("cuda", enabled=False)
+        with torch.no_grad(), ctx:
             logits, value = self.network(x)
 
         logits_np = logits.detach().cpu().numpy()
         values_np = value.detach().cpu().numpy().reshape(-1)
         results: list[tuple["Node", np.ndarray, float]] = []
         for node, logit_row, v in zip(leaves, logits_np, values_np):
-            prior = decode_policy(logit_row, node.board, color=node.color)
+            # The MCTS tree precomputes node.legal_moves for every leaf before
+            # submit, so decode can reuse it instead of rescanning all N*N
+            # points for legality (P11 speedup; falls back to the scan when a
+            # bare node has no legal_moves yet).
+            prior = decode_policy(
+                logit_row, node.board, color=node.color,
+                legal_moves=node.legal_moves,
+            )
             results.append((node, prior, float(v)))
 
         self.batch_sizes.append(len(results))

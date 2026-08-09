@@ -194,6 +194,8 @@ def train_steps(
     symmetry: bool = True,
     lr_base: float = 0.2,
     schedule_steps: "tuple[int, ...] | list[int]" = (50000, 100000),
+    human_sampler=None,
+    human_mix: float = 0.0,
 ) -> tuple[list[float], list[float], int, "np.random.Generator"]:
     """Train ``steps`` optimizer steps, sampling batches from ``buffer``.
 
@@ -206,6 +208,19 @@ def train_steps(
     makes deterministic-resume exact. When ``rng is None`` a fresh one is
     created from ``seed``.
 
+    ``human_sampler`` + ``human_mix`` implement KataGo-style human-data
+    mixing (P11): when ``human_mix > 0`` and a ``human_sampler`` is given, each
+    step's batch is ``human_n = round(mix * batch_size)`` human positions (in
+    the RL batch format, from ``human_sampler(rng, human_n)``) concatenated
+    with ``rl_n = batch_size - human_n`` self-play positions (from
+    ``buffer.sample``), keeping the total at exactly ``batch_size``. Both
+    streams draw from the *same* persistent ``rng`` in a fixed order (RL
+    first, then human), so the rng state persisted in the checkpoint already
+    reproduces a mixed run across resume -- no extra checkpoint state. When
+    ``human_mix <= 0``, ``human_sampler`` is None, or ``human_n`` rounds to 0
+    the step short-circuits to the pure-RL path, byte-identical to the
+    pre-mix behavior (the human stream is not advanced).
+
     Returns ``(losses, lrs, global_step, rng)``.
     """
     if rng is None:
@@ -217,7 +232,28 @@ def train_steps(
     for _ in range(int(steps)):
         lr = agz_lr(global_step, lr_base, schedule_steps)
         set_learning_rate(optimizer, lr)
-        batch = buffer.sample(int(batch_size), rng)
+        mix = float(human_mix)
+        if human_sampler is not None and mix > 0.0:
+            human_n = int(round(mix * int(batch_size)))
+            if human_n > 0:
+                rl_n = int(batch_size) - human_n
+                if rl_n < 1:
+                    raise ValueError(
+                        f"human_mix {mix} leaves no room for self-play samples "
+                        f"in a batch of {int(batch_size)}"
+                    )
+                batch_rl = buffer.sample(rl_n, rng)
+                batch_h = human_sampler(rng, human_n)
+                batch = {
+                    "s": np.concatenate([batch_rl["s"], batch_h["s"]], axis=0),
+                    "pi": np.concatenate([batch_rl["pi"], batch_h["pi"]], axis=0),
+                    "z": np.concatenate([batch_rl["z"], batch_h["z"]], axis=0),
+                }
+            else:
+                # mix rounds to zero human samples: exact pure-RL path.
+                batch = buffer.sample(int(batch_size), rng)
+        else:
+            batch = buffer.sample(int(batch_size), rng)
         if symmetry:
             s8, pi8 = augment_batch(batch["s"], batch["pi"])
             batch = {

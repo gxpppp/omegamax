@@ -200,7 +200,8 @@ def encode_batch(
 # decode_policy: logits -> legal-move probability distribution
 # ---------------------------------------------------------------------------
 
-def decode_policy(logits, board: Board, color: int | None = None) -> np.ndarray:
+def decode_policy(logits, board: Board, color: int | None = None,
+                  legal_moves=None) -> np.ndarray:
     """Turn raw policy logits into a distribution over *legal* moves.
 
     Args:
@@ -209,6 +210,12 @@ def decode_policy(logits, board: Board, color: int | None = None) -> np.ndarray:
         board: the position whose legal moves mask the distribution.
         color: side to move; when ``None`` it is derived from the move count
             (black opens, so even move count -> black to move).
+        legal_moves: optional precomputed legal action indices (an iterable of
+            flat indices including pass). When given, the legality scan over
+            the whole board is skipped -- the MCTS tree already computed
+            ``node.legal_moves`` for every leaf submitted to the batched
+            evaluator (P11 self-play speedup: this removes the per-leaf
+            361-point ``Board.is_legal`` rescan, the dominant Python cost).
 
     Returns:
         ``(board_size**2 + 1,)`` float32 probabilities over legal moves,
@@ -229,12 +236,17 @@ def decode_policy(logits, board: Board, color: int | None = None) -> np.ndarray:
         color = BLACK if len(board.moves) % 2 == 0 else WHITE
 
     scores = np.full(n_points + 1, -np.inf, dtype=np.float64)
-    for r in range(n):
-        for c in range(n):
-            if board.is_legal((r, c), color):
-                scores[point_to_index(r, c, n)] = logits[point_to_index(r, c, n)]
-    # pass is always legal
-    scores[pass_index(n)] = logits[pass_index(n)]
+    if legal_moves is not None:
+        # fast path: the caller already knows the legal set (MCTS leaves).
+        for action in legal_moves:
+            scores[int(action)] = logits[int(action)]
+    else:
+        for r in range(n):
+            for c in range(n):
+                if board.is_legal((r, c), color):
+                    scores[point_to_index(r, c, n)] = logits[point_to_index(r, c, n)]
+        # pass is always legal
+        scores[pass_index(n)] = logits[pass_index(n)]
 
     if not np.isfinite(scores).any():
         # no legal move at all (defensive; in Go pass is always legal)

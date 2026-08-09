@@ -7,7 +7,7 @@ without an API change.
 """
 
 from .captures import captured_groups
-from .liberties import EMPTY, has_liberty
+from .liberties import EMPTY, has_liberty, neighbors
 
 
 class IllegalMoveError(ValueError):
@@ -37,6 +37,16 @@ def is_legal_move(state, size, move, color):
     idx = r * size + c
     if state[idx] != EMPTY:
         return False
+    # Fast path (P11 self-play speedup): an empty orthogonal neighbor means the
+    # placed stone keeps at least one liberty of its own, so the move can never
+    # be suicide -- and captures never turn a legal move illegal. This avoids
+    # the (much more expensive) placement simulation + group scan for the
+    # common open-board case while returning exactly the same answer.
+    for nr, nc in neighbors(r, c, size):
+        if state[nr * size + nc] == EMPTY:
+            return True
+    # Every neighbor is occupied: legal iff the move captures at least one
+    # opponent stone or the placed stone joins a group that keeps a liberty.
     # Simulate the placement (restored in ``finally``) to evaluate suicide.
     state[idx] = color
     try:

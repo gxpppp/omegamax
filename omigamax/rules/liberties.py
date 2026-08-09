@@ -73,5 +73,27 @@ def liberty_count(state, size, r, c):
 
 
 def has_liberty(state, size, r, c):
-    """True if the group at (r, c) has at least one liberty."""
-    return liberty_count(state, size, r, c) > 0
+    """True if the group at (r, c) has at least one liberty.
+
+    Early-exits at the first liberty found instead of materializing the full
+    liberty set (P11 self-play speedup); returns exactly
+    ``liberty_count(state, size, r, c) > 0`` for every position.
+    """
+    color = state[r * size + c]
+    if color == EMPTY:
+        return False
+    visited = set()
+    stack = [(r, c)]
+    while stack:
+        cur = stack.pop()
+        if cur in visited:
+            continue
+        visited.add(cur)
+        cr, cc = cur
+        for nr, nc in neighbors(cr, cc, size):
+            ni = nr * size + nc
+            if state[ni] == EMPTY:
+                return True
+            if state[ni] == color and (nr, nc) not in visited:
+                stack.append((nr, nc))
+    return False

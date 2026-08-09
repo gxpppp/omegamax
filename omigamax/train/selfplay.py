@@ -69,6 +69,7 @@ from omigamax.mcts import (
     DEFAULT_DIRICHLET_ALPHA,
     DEFAULT_DIRICHLET_EPS,
     DEFAULT_KOMI,
+    DEFAULT_LEAF_BATCH,
     DEFAULT_TEMPERATURE_THRESHOLD,
     DEFAULT_VIRTUAL_LOSS,
     MCTS,
@@ -135,6 +136,8 @@ def play_game(
     seed: "int | None" = None,
     evaluator=None,
     frame_callback=None,
+    leaf_batch: "int | None" = None,
+    fp16: "bool | None" = None,
 ) -> dict:
     """Play one full self-play game with ``network`` on both sides.
 
@@ -159,6 +162,13 @@ def play_game(
         seed: numpy seed for the game's RNG (noise + move sampling).
         evaluator: optional leaf evaluator (default
             :class:`BatchedNetworkEvaluator` built over ``network``).
+        leaf_batch: leaves collected per network forward (default ``config
+            leaf_batch`` = 16). Also threaded into the evaluator and MCTS so a
+            ``cfg`` override takes effect everywhere (P11).
+        fp16: run leaf inference under fp16 ``autocast`` on CUDA (default
+            ``config selfplay_fp16`` = False; ``None`` falls back to the
+            config). Games stay legal -- only the numerics of move selection
+            may shift slightly.
         frame_callback: optional ``frame_callback(board, move_number, color)``
             invoked AFTER EVERY move (each stone / pass placement) with the
             LIVE rules ``Board`` right after that move, the 1-based
@@ -210,8 +220,16 @@ def play_game(
     network.eval()
     rng = np.random.default_rng(seed)
     board = Board(size)
+    # P11: leaf_batch / fp16 are threaded from the config (or explicit kwargs)
+    # into BOTH the evaluator and the MCTS batch cadence, so a cfg override
+    # really changes how many leaves share one forward.
+    leaf_batch = int(leaf_batch if leaf_batch is not None
+                     else cfg.get("leaf_batch", DEFAULT_LEAF_BATCH))
+    use_fp16 = bool(fp16 if fp16 is not None
+                    else cfg.get("selfplay_fp16", False))
     if evaluator is None:
-        evaluator = BatchedNetworkEvaluator(network)
+        evaluator = BatchedNetworkEvaluator(
+            network, batch_size=leaf_batch, fp16=use_fp16)
     virtual_loss = int(cfg.get("virtual_loss", DEFAULT_VIRTUAL_LOSS))
     mcts = MCTS(
         network=network,
@@ -221,6 +239,7 @@ def play_game(
         dirichlet_eps=dirichlet_eps,
         dirichlet_rng=rng,
         virtual_loss=virtual_loss,
+        leaf_batch=leaf_batch,
     )
 
     state_history = [board.state]
@@ -465,6 +484,14 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--keep-games", type=int, default=None,
                         help="npz files to keep (default: config "
                              "replay_buffer_games=1000)")
+    parser.add_argument("--leaf-batch", type=int, default=None,
+                        help="leaves per network forward (default: config "
+                             "leaf_batch=16; larger batches amortize the GPU "
+                             "call and Python overhead)")
+    parser.add_argument("--fp16", action="store_true",
+                        help="run leaf inference under fp16 autocast on CUDA "
+                             "(self-play only; move numerics may shift "
+                             "slightly but games stay legal)")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (games use seed + index)")
     parser.add_argument("--config", type=str, default=None,
@@ -511,6 +538,8 @@ def main(argv: "list[str] | None" = None) -> int:
         simulations=args.simulations,
         temperature_threshold=args.temperature_threshold,
         max_moves=args.max_moves,
+        leaf_batch=args.leaf_batch,
+        fp16=args.fp16,
     )
 
     warned = report["sims_per_sec"] < SOFT_SIMS_PER_SEC_WARN

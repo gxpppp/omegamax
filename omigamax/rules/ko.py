@@ -21,4 +21,9 @@ def is_ko_prohibited(last_captured_point, move):
     """
     if move is None or last_captured_point is None:
         return False
-    return tuple(move) == tuple(last_captured_point)
+    # Compare the two coordinates directly -- ``tuple()`` copies would cost
+    # 1.6M+ allocations on the MCTS expansion path (P11 self-play speedup).
+    return (
+        move[0] == last_captured_point[0]
+        and move[1] == last_captured_point[1]
+    )
