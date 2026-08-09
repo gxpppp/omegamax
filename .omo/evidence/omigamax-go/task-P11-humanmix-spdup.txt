@@ -1,0 +1,106 @@
+================================================================================
+task-P11: RL 人类数据混合 + 自对弈提速
+================================================================================
+HEAD parent: 4eb5fc4 | date: 2026-08-09 | GPU: RTX 3060 Laptop 6GB (cuda 2.13.0+cu130)
+code commit: 8ad25392c49d59ecd5a6c8e8a4886baf185cf560 (evidence commit follows)
+pytest total: 498 passed (480 baseline + 6 test_human_mix + 12 test_selfplay_speed)
+
+--------------------------------------------------------------------------------
+PART 1 — HUMAN-MIX (KataGo-style (1-mix)/mix batches)
+--------------------------------------------------------------------------------
+DESIGN (rng / checkpoint / resume semantics)
+- train_steps(model, optimizer, buffer, steps, *, ..., human_sampler=None,
+  human_mix=0.0): per step human_n = round(mix*batch_size), rl_n =
+  batch_size - human_n (total stays exactly batch_size, divisible by the 8x
+  symmetry chunker). RL part = buffer.sample(rl_n, rng); human part =
+  human_sampler(rng, human_n); concatenated into one dict {s,pi,z}.
+- BOTH streams draw from the SAME persistent numpy rng, RL first then human,
+  in a fixed order per step. The rng state is already persisted by
+  save_checkpoint("rng_state"); NO new checkpoint fields needed -> resume is
+  loss-reproducible with mixing on (verified by test_d_resume_reproducible).
+- mix <= 0 OR human_sampler None OR round(mix*B)==0 -> pure-RL short-circuit,
+  byte-identical to pre-P11 (the human stream is NOT advanced).
+- run_loop: when human_mix>0 creates PretrainChunks(data/pretrain) read-only,
+  verifies chunk board_size == model board_size (else ValueError), builds the
+  sampler via make_human_sampler(chunks), passes sampler+mix to train_steps,
+  closes the mmap handles at run end. CLI: --human-mix FLOAT (default 0.0),
+  --pretrain-data-dir (default data/pretrain). Symmetry path: the mixed batch
+  goes through the SAME augment_batch as a whole (8x) -- numpy flips/rotations
+  work on the float32 mixed arrays (test_e asserts shapes 8B x 17 x N x N).
+
+CONVERSION HELPER (omigamax/train/pretrain.py)
+- PretrainChunks.board_size property (first chunk's s shape, additive).
+- convert_to_rl_batch(batch): s uint8 (B,17,N,N) -> float32 value-preserving;
+  pi uint16 index 0..N*N -> one-hot (B,N*N+1) float32 (index N*N=pass lands in
+  the last slot); z int8 (B,) -> (B,1) float32. N derived from s.shape[-1] so
+  9x9 test chunks and the 19x19 corpus both convert correctly.
+- make_human_sampler(chunks) -> callable(rng, n) = convert(sample_batch(rng,n)).
+- Public sampling API of PretrainChunks untouched -> cli/evaluate.py human-match
+  unaffected (its 44 call sites + tests still green).
+
+TESTS (tests/test_human_mix.py)
+  test_mix_zero_is_pure_rl            -- (a) mix=0 identical losses+rng state, sampler never called
+  test_mix_quarter_composition        -- (b) rl_n=48/human_n=16/batch=64 spied per step
+  test_mix_quarter_loss_decreases     -- (b) 20 steps, finite, final < first (lr_base 0.02)
+  test_convert_to_rl_batch            -- (c) uint8->f32, index->one-hot (361/81 pass), z (B,1)
+  test_resume_reproducible_with_mix   -- (d) (k save+reload k) == 2k uninterrupted, atol 1e-6
+  test_symmetry_mixed_batch_shapes    -- (e) 8x mixed batch shapes + finite loss
+
+--------------------------------------------------------------------------------
+PART 2 — SELF-PLAY SPEEDUP (measure first, P10 methodology: serial runs,
+        1 game x 150 sims x max_moves 150, real b20c256 models/pretrain.pt,
+        nvidia-smi every 1s, startup excluded)
+--------------------------------------------------------------------------------
+BOTTLENECK (baseline cProfile + flush-phase timings): Python MCTS + rules
+engine dominates, NOT the GPU. Old-code 150-sim game: 98.66 sims/s, GPU
+forward ~4.6% of wall, python_mcts_overhead 80.8%, mean leaves/flush 5.89
+(batches rarely fill to leaf_batch=16 -> raising leaf_batch can't help).
+Hot spots: is_legal/is_ko 25.9s, expand/board.play 17.9s, .cpu() sync (forward
+hidden inside) 10.8s, decode_policy 7.9s (re-scanned 361 legality points/leaf).
+
+FIXES (each behavior-preserving; tests stayed green throughout):
+  1. decode_policy(logits, board, color, legal_moves=None): MCTS leaves already
+     carry node.legal_moves -> skip the 361-point is_legal rescan per leaf.
+  2. is_legal_move empty-neighbor fast path: an empty orthogonal neighbor means
+     the stone keeps a liberty -> never suicide -> legal immediately (skips the
+     placement simulation + group scan for the common open-board case).
+  3. has_liberty early-exit on first liberty (was building the full set).
+  4. Board.play(..., check_legal=False) used by MCTS expand (actions already
+     vetted by legal_actions, incl. simple-ko) -> halves per-child is_legal.
+  5. is_ko_prohibited compares coords directly (no tuple() allocation, 1.6M+).
+  6. fp16 self-play inference: BatchedNetworkEvaluator(..., fp16) runs the
+     flush forward under torch.autocast('cuda', fp16) (no-op on CPU; eval-gate
+     evaluators keep default fp16=False). Threaded from cfg "selfplay_fp16" or
+     play_game(leaf_batch=, fp16=) / CLI --selfplay-fp16 / --fp16.
+  7. leaf_batch threaded cfg->play_game->evaluator AND MCTS batch cadence
+     (previously the evaluator saw a different cadence than run_search).
+
+SPEEDUP TABLE (one combo at a time, b20c256-19, 150 sims, 150-move cap):
+  config                    sims/s   mean GPU util%   speedup vs baseline
+  baseline fp32 lb16 (old)   98.66      ~35 (sampled)   1.00x
+  fp32 lb16 (new code)      186.0       34.9            1.89x
+  fp32 lb32                 178.2       34.4            1.81x
+  fp32 lb64                 177.8       34.7            1.80x
+  fp16 lb16  *WINNER*       206.8       28.7            2.10x
+  fp16 lb32                 207.5       28.8            2.10x
+  fp16 lb64                 207.7       30.2            2.11x
+  (independent 2-game legality run at fp16 lb16: 218.1 sims/s, ALL_MOVES_LEGAL)
+
+WINNER SELF-PLAY CONFIG: selfplay fp16 + leaf_batch 16 (default unchanged) =>
+206.8 sims/s = 2.10x. leaf_batch 32/64 add <=0.4% (batches don't fill, mean
+~6 leaves/flush); fp16 adds ~11% over the optimized fp32. fp16 may shift move
+selection numerically (documented, acceptable) but games stay legal.
+
+TESTS (tests/test_selfplay_speed.py)
+  test_is_legal_fastpath_matches_reference   -- 5 seeds x 6 boards x 2 colors x 81 pts
+  test_has_liberty_matches_liberties         -- 30 random boards
+  test_play_check_legal_false_matches_checked-- 20 random games, identical state
+  test_decode_policy_legal_moves_equals_default -- legal_moves param == scan
+  test_fp16_evaluator_cpu_bit_exact          -- CPU fp16 == fp32 bit-exact
+  test_fp16_evaluator_cuda_legal_and_finite  -- CUDA fp16: legal, normalized, finite
+  test_leaf_batch_threaded_into_evaluator    -- play_game threads leaf_batch+fp16
+  test_evaluator_batch_size_bounds
+
+NOT-TOUCHED: config/default.yaml (leaf_batch 16 / fp16 off stay), data/pretrain
+read-only, PretrainChunks public sampling API, RL loop not started (later task).
+================================================================================
