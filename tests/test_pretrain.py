@@ -282,3 +282,44 @@ def test_b20c256_gpu_smoke_20_steps_loss_and_memory(tmp_path):
 
 def test_pretrain_lr_schedule_empty_steps_is_constant():
     assert pretrain_lr(12345, 0.02, ()) == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# (e) AMP (autocast + GradScaler) -- opt-in, fp32 default unchanged
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_pretrain_run_amp_tiny_9x9_20_steps_finite_and_decreasing(tmp_path):
+    """AMP run on a tiny 9x9 model (blocks=1, channels=8), 20 steps: loss stays
+    finite (no NaNs) and decreases -- the autocast+GradScaler path trains."""
+    board = 9
+    data_dir = make_synthetic_chunks(tmp_path / "data", board, sizes=[256])
+    torch.manual_seed(0)
+    model = create_model(1, 8, board).cuda()
+    optimizer = make_pretrain_optimizer(model, lr=0.02, momentum=0.9, l2=1e-4)
+    with PretrainChunks(data_dir) as chunks:
+        metrics, step, _ = run_pretrain(
+            model, optimizer, chunks, steps=20, rng=np.random.default_rng(0),
+            global_step=0, batch_size=16, device=DEVICE, lr_base=0.02,
+            lr_steps=(), amp=True,
+        )
+    assert step == 20 and len(metrics) == 20
+    losses = [m["loss_total"] for m in metrics]
+    assert all(np.isfinite(losses)), f"non-finite losses under AMP: {losses}"
+    assert losses[-1] < losses[0] * 0.98, (
+        f"loss did not decrease under AMP: {losses[0]} -> {losses[-1]}"
+    )
+
+
+def test_pretrain_amp_requires_cuda(tmp_path):
+    """amp=True on a CPU run is rejected loudly instead of silently ignoring."""
+    board = 9
+    data_dir = make_synthetic_chunks(tmp_path / "data", board, sizes=[16])
+    model = create_model(1, 8, board)
+    optimizer = make_pretrain_optimizer(model, lr=0.02, momentum=0.9, l2=1e-4)
+    with PretrainChunks(data_dir) as chunks:
+        with pytest.raises(ValueError, match="CUDA"):
+            run_pretrain(
+                model, optimizer, chunks, steps=2, batch_size=8,
+                device=torch.device("cpu"), amp=True,
+            )

@@ -232,6 +232,8 @@ def pretrain_step(
     batch: dict,
     device: "torch.device | None" = None,
     grad_clip: "float | None" = DEFAULT_GRAD_CLIP,
+    *,
+    scaler: "torch.amp.GradScaler | None" = None,
 ) -> dict:
     """One supervised optimizer step; return per-component metrics.
 
@@ -240,6 +242,14 @@ def pretrain_step(
     one-hot, int8 z -> float32), runs CE over the full ``N*N + 1`` logits
     (no legal mask -- human moves are legal by construction and masking would
     leak legality supervision), MSE value, clips gradients and steps.
+
+    ``scaler`` (optional ``torch.amp.GradScaler``) opts into AMP: the forward
+    pass runs under ``torch.autocast("cuda", float16)`` and backward / grad
+    clip / step go through the scaler (unscale-before-clip keeps the locked
+    grad-norm-1.0 recipe intact). ``None`` (default) keeps the deterministic
+    fp32 path byte-identical to the pre-AMP behavior. The scaler is created by
+    the caller (:func:`run_pretrain`) so its internal state persists across
+    steps.
     """
     if device is None:
         device = next(model.parameters()).device
@@ -256,16 +266,28 @@ def pretrain_step(
         device, dtype=torch.float32
     )
 
-    logits, value = model(s)
-    pi_onehot = F.one_hot(pi_idx, num_classes=logits.shape[-1]).float()
-    policy_ce = policy_cross_entropy(logits, pi_onehot)
-    value_loss = value_mse(value, z.view(-1, 1))
-    total = agz_loss(logits, value, pi_onehot, z.view(-1, 1))
+    autocast_ctx = torch.autocast(
+        "cuda", enabled=scaler is not None, dtype=torch.float16
+    )
+    with autocast_ctx:
+        logits, value = model(s)
+        pi_onehot = F.one_hot(pi_idx, num_classes=logits.shape[-1]).float()
+        policy_ce = policy_cross_entropy(logits, pi_onehot)
+        value_loss = value_mse(value, z.view(-1, 1))
+        total = agz_loss(logits, value, pi_onehot, z.view(-1, 1))
 
-    total.backward()
-    if grad_clip is not None and float(grad_clip) > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
-    optimizer.step()
+    if scaler is not None:
+        scaler.scale(total).backward()
+        if grad_clip is not None and float(grad_clip) > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        total.backward()
+        if grad_clip is not None and float(grad_clip) > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+        optimizer.step()
 
     with torch.no_grad():
         acc = (logits.detach().argmax(dim=-1) == pi_idx).float().mean().item()
@@ -293,6 +315,7 @@ def run_pretrain(
     lr_steps: "tuple[int, ...] | list[int]" = DEFAULT_LR_STEPS,
     log_path: "str | os.PathLike | None" = None,
     log_every: int = 10,
+    amp: bool = False,
 ) -> tuple[list[dict], int, "np.random.Generator"]:
     """Train ``steps`` supervised steps; return ``(metrics, global_step, rng)``.
 
@@ -301,11 +324,18 @@ def run_pretrain(
     top-1 policy accuracy vs the human move, lr) and JSONL-log every
     ``log_every`` steps. ``global_step`` advances by one and the mutable
     ``rng`` is returned (persist both for exact resume).
+
+    ``amp=True`` runs each step with fp16 ``autocast`` + a persistent
+    ``torch.amp.GradScaler`` (opt-in; requires CUDA -- raises ``ValueError``
+    otherwise). ``False`` (default) is the deterministic fp32 path.
     """
     if rng is None:
         rng = np.random.default_rng(seed)
     if device is None:
         device = next(model.parameters()).device
+    if amp and device.type != "cuda":
+        raise ValueError("amp=True requires a CUDA device")
+    scaler = torch.amp.GradScaler("cuda") if amp else None
     metrics: list[dict] = []
     log_fh = None
     try:
@@ -316,7 +346,10 @@ def run_pretrain(
             lr = pretrain_lr(global_step, lr_base, lr_steps)
             set_learning_rate(optimizer, lr)
             batch = chunks.sample_batch(rng, int(batch_size))
-            m = pretrain_step(model, optimizer, batch, device=device, grad_clip=grad_clip)
+            m = pretrain_step(
+                model, optimizer, batch, device=device, grad_clip=grad_clip,
+                scaler=scaler,
+            )
             m["step"] = int(global_step)
             m["lr"] = float(lr)
             metrics.append(m)

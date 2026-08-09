@@ -28,7 +28,8 @@ most once across blocks -- chunking never duplicates a step line.
 
 Usage:
     uv run python -m omigamax.cli.pretrain [--steps 200] [--batch-size 64]
-        [--lr 0.02] [--blocks 20] [--channels 256] [--save-every 5000] [--resume]
+        [--lr 0.02] [--blocks 20] [--channels 256] [--save-every 5000]
+        [--amp] [--resume]
 """
 
 from __future__ import annotations
@@ -99,6 +100,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--save-every", type=int, default=5000,
                     help="write a checkpoint every N steps (default 5000; the "
                          "final checkpoint is always written at the end)")
+    ap.add_argument("--amp", action="store_true",
+                    help="train with fp16 autocast + GradScaler (AMP; opt-in, "
+                         "default off -- the deterministic fp32 path is unchanged)")
     return ap
 
 
@@ -151,6 +155,7 @@ def main(argv: "list[str] | None" = None) -> int:
             "momentum": args.momentum, "l2": args.l2,
             "grad_clip": args.grad_clip, "lr_steps": list(args.lr_steps),
             "batch_size": args.batch_size, "seed": args.seed,
+            "amp": bool(args.amp),
         }
         extra = {"total_positions": report["total_positions"],
                  "resumed": resumed}
@@ -176,6 +181,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 device=device, grad_clip=args.grad_clip, lr_base=args.lr,
                 lr_steps=tuple(args.lr_steps) if args.lr_steps else (),
                 log_path=args.log_path, log_every=args.log_every,
+                amp=bool(args.amp),
             )
             metrics.extend(m)
             steps_left -= chunk
@@ -205,7 +211,7 @@ def main(argv: "list[str] | None" = None) -> int:
     print(f"  steps         : {len(metrics):,} (global_step {final_step:,}"
           f"{' after resume from ' + str(resumed['step']) if resumed else ''})")
     print(f"  batch size    : {args.batch_size}   lr {args.lr}  "
-          f"grad_clip {args.grad_clip}")
+          f"grad_clip {args.grad_clip}  amp {'on' if args.amp else 'off'}")
     if first:
         print(f"  loss first    : total {first['loss_total']:.4f} "
               f"policy {first['loss_policy']:.4f} value {first['loss_value']:.4f} "
