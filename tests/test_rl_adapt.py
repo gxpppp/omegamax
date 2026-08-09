@@ -115,7 +115,11 @@ class TestPretrainLoadsInRL:
         )
         model = st["model"]
         assert (model.blocks, model.channels, model.board_size) == (20, 256, 19)
-        assert st["global_step"] == 200          # P5 recorded global_step
+        # the checkpoint's recorded global_step is loaded (the P5 smoke
+        # artifact recorded 200; the real 60k-step run records 60000 -- assert
+        # against the checkpoint itself, not a pinned step count)
+        from omigamax.train.train import load_checkpoint
+        assert st["global_step"] == int(load_checkpoint(PRETRAIN)["global_step"])
         assert st["resumed"] is False
         assert st["init_checkpoint"] == str(PRETRAIN)
         n = sum(p.numel() for p in model.parameters())

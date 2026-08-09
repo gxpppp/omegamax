@@ -112,6 +112,16 @@ def sample_eval_set(
 # human-match metrics
 # ---------------------------------------------------------------------------
 
+# P8b acceptance fix: the documented default (--samples 20000) forwards the
+# WHOLE eval set in one batch. On the 6GB GPU that is a single ~7.4GB
+# activation tensor at b20c256 -> OOM, and on CPU a one-shot 20k conv is
+# pathologically slow. Chunk the forward (the same discipline as
+# ``train_on_batch``'s chunking) so human-match runs in seconds on cuda while
+# staying CPU-safe. 128 stays well under the measured cuDNN
+# pathological-slowdown threshold (~512) on this card.
+EVAL_CHUNK = 128
+
+
 def evaluate_model(
     model: torch.nn.Module, batch: dict, device: torch.device
 ) -> dict:
@@ -122,40 +132,65 @@ def evaluate_model(
     construction), value MSE against ``z``, top-1 = argmax(logits) == human
     move, top-5 = human move in the top-5 logits, and the Pearson correlation
     between the game outcome ``z`` and the value head's ``tanh`` output.
+
+    The forward runs in ``EVAL_CHUNK``-sized contiguous chunks (metrics are
+    mean-weighted so the result is bit-identical to a single full-batch pass);
+    a 20k-sample human-match therefore fits comfortably inside the 6GB budget.
     """
     model.eval()
+    s = torch.from_numpy(np.ascontiguousarray(batch["s"])).to(
+        device, dtype=torch.float32
+    )
+    pi_idx = torch.from_numpy(
+        np.ascontiguousarray(batch["pi"]).astype(np.int64)
+    ).to(device)
+    z = torch.from_numpy(np.ascontiguousarray(batch["z"])).to(
+        device, dtype=torch.float32
+    )
+    n = int(s.shape[0])
+    chunk = max(1, int(EVAL_CHUNK))
+    ce_sum = 0.0
+    mse_sum = 0.0
+    top1_hits = 0
+    top5_hits = 0
+    v_parts: "list[np.ndarray]" = []
+    z_parts: "list[np.ndarray]" = []
     with torch.no_grad():
-        s = torch.from_numpy(np.ascontiguousarray(batch["s"])).to(
-            device, dtype=torch.float32
-        )
-        pi_idx = torch.from_numpy(
-            np.ascontiguousarray(batch["pi"]).astype(np.int64)
-        ).to(device)
-        z = torch.from_numpy(np.ascontiguousarray(batch["z"])).to(
-            device, dtype=torch.float32
-        )
-        logits, value = model(s)
-        pi_onehot = F.one_hot(pi_idx, num_classes=logits.shape[-1]).float()
-        ce = float(policy_cross_entropy(logits, pi_onehot).item())
-        mse = float(value_mse(value, z.view(-1, 1)).item())
-        top1 = float((logits.argmax(dim=-1) == pi_idx).float().mean().item())
-        k = min(5, int(logits.shape[-1]))
-        topk = logits.topk(k, dim=-1).indices
-        top5 = float(
-            (pi_idx.unsqueeze(1) == topk).any(dim=1).float().mean().item()
-        )
-        v = np.tanh(value.detach().cpu().numpy().reshape(-1).astype(np.float64))
-        z_np = z.detach().cpu().numpy().reshape(-1).astype(np.float64)
+        for i in range(0, n, chunk):
+            s_c = s[i:i + chunk]
+            pi_c = pi_idx[i:i + chunk]
+            z_c = z[i:i + chunk]
+            logits, value = model(s_c)
+            pi_onehot = F.one_hot(pi_c, num_classes=logits.shape[-1]).float()
+            b = int(logits.shape[0])
+            ce_sum += float(policy_cross_entropy(logits, pi_onehot).item()) * b
+            mse_sum += float(value_mse(value, z_c.view(-1, 1)).item()) * b
+            top1_hits += int((logits.argmax(dim=-1) == pi_c).sum().item())
+            k = min(5, int(logits.shape[-1]))
+            topk = logits.topk(k, dim=-1).indices
+            top5_hits += int(
+                (pi_c.unsqueeze(1) == topk).any(dim=1).sum().item()
+            )
+            v_parts.append(
+                np.tanh(
+                    value.detach().cpu().numpy().reshape(-1).astype(np.float64)
+                )
+            )
+            z_parts.append(
+                z_c.detach().cpu().numpy().reshape(-1).astype(np.float64)
+            )
+    v = np.concatenate(v_parts)
+    z_np = np.concatenate(z_parts)
     pearson = float(np.corrcoef(z_np, v)[0, 1]) if z_np.size > 1 else 0.0
     if not math.isfinite(pearson):
         # degenerate constant value head -> report 0 (uncorrelated)
         pearson = 0.0
     return {
-        "n": int(s.shape[0]),
-        "top1": float(top1),
-        "top5": float(top5),
-        "policy_ce": ce,
-        "value_mse": mse,
+        "n": n,
+        "top1": float(top1_hits / n),
+        "top5": float(top5_hits / n),
+        "policy_ce": ce_sum / n,
+        "value_mse": mse_sum / n,
         "pearson": pearson,
     }
 
@@ -333,8 +368,14 @@ def write_report(
     bench: dict,
     *,
     verdict: "str | None" = None,
+    smoke: "dict | None" = None,
 ) -> str:
-    """Write a human-readable summary of both modes' numbers to ``path``."""
+    """Write a human-readable summary of all acceptance numbers to ``path``.
+
+    ``human`` and ``bench`` are the human-match / bench mode results; ``smoke``
+    (optional) is the P7b RL warm-start smoke result (the loop report dict,
+    optionally enriched with the ``arch`` it wrote to ``models/latest.pt``).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -348,7 +389,7 @@ def write_report(
     lines.append("=" * 72)
     lines.append(f"generated : {time.strftime('%Y-%m-%dT%H:%M:%S')}")
     lines.append(f"checkpoint: {human.get('checkpoint', bench.get('checkpoint', '?'))}")
-    arch = human.get("arch") or bench.get("arch_a") or {}
+    arch = human.get("arch") or bench.get("arch_a") or smoke.get("arch") or {}
     lines.append(
         f"arch      : blocks={arch.get('blocks')} channels={arch.get('channels')} "
         f"board={arch.get('board_size')}"
@@ -408,10 +449,38 @@ def write_report(
         lines.append(f"verdict: {verdict}")
         lines.append("")
 
+    if smoke:
+        s = smoke.get("loop", {})
+        p = smoke.get("protocol", {})
+        ck = smoke.get("checkpoint", {})
+        sarch = smoke.get("arch") or {}
+        lines.append("[3] RL warm-start smoke (P7b -- 200-step finetune smoke)")
+        lines.append("-" * 72)
+        lines.append(
+            f"  run      : warm-started from "
+            f"{smoke.get('init_checkpoint', p.get('init_checkpoint', '?'))} "
+            f"on {smoke.get('device', '?')}; {s.get('steps_trained', '?')} train "
+            f"steps (batch {p.get('batch_size', '?')}), "
+            f"{s.get('games_generated', '?')} self-play game(s) at "
+            f"{p.get('simulations', '?')} sims/move"
+        )
+        lines.append(
+            f"  loss     : {float(s.get('loss_first', float('nan'))):.4f} -> "
+            f"{float(s.get('loss_last', float('nan'))):.4f} (finite, "
+            f"decrease={s.get('loss_decrease', None)})"
+        )
+        lines.append(
+            f"  latest.pt: {ck.get('latest_exists', False)}  global_step "
+            f"{s.get('global_step_final', '?')}  arch blocks={sarch.get('blocks')} "
+            f"channels={sarch.get('channels')} board={sarch.get('board_size')}"
+        )
+        lines.append("")
+
     lines.append(
-        "note: the full acceptance run on the trained checkpoint is deferred "
-        "until the P6 pretraining run finishes (GPU busy); this report "
-        "summarizes the P8 code-phase evaluation."
+        "note: acceptance run executed on the trained checkpoint -- "
+        "human-match + bench on models/pretrain.pt plus the 200-step RL "
+        "warm-start smoke; every number above is measured (see also "
+        "task-P9-accept.txt for the per-criterion verdict)."
     )
     text = "\n".join(lines) + "\n"
     tmp = path.with_name(path.name + ".tmp")
@@ -489,6 +558,10 @@ def _build_parser() -> argparse.ArgumentParser:
                      help=f"human-match JSON (default {DEFAULT_HUMAN_JSON})")
     p_r.add_argument("--bench-json", type=str, default=str(DEFAULT_BENCH_JSON),
                      help=f"bench JSON (default {DEFAULT_BENCH_JSON})")
+    p_r.add_argument("--smoke-json", type=str,
+                     default=str(EVIDENCE_DIR / "task-P7b-rl-smoke.json"),
+                     help="P7b RL warm-start smoke JSON (optional; section is "
+                          "omitted when the file is absent)")
     p_r.add_argument("--report", type=str, default=str(DEFAULT_REPORT),
                      help=f"output text (default {DEFAULT_REPORT})")
     return ap
@@ -579,7 +652,18 @@ def main(argv: "list[str] | None" = None) -> int:
     # report
     human = json.loads(Path(args.human_json).read_text(encoding="utf-8"))
     bench = json.loads(Path(args.bench_json).read_text(encoding="utf-8"))
-    path = write_report(args.report, human, bench)
+    smoke = None
+    smoke_path = Path(args.smoke_json)
+    if smoke_path.exists():
+        smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+        # enrich with the arch the smoke actually wrote to models/latest.pt
+        # (verified by loading the checkpoint; absent -> keep the JSON keys)
+        try:
+            smoke["arch"] = {k: v for k, v in
+                             load_checkpoint("models/latest.pt")["arch"].items()}
+        except Exception:  # noqa: BLE001 - optional enrichment
+            pass
+    path = write_report(args.report, human, bench, smoke=smoke)
     print(f"report written: {path}", flush=True)
     return 0
 

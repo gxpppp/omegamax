@@ -341,6 +341,32 @@ class TestP8HumanMatch:
         assert base["policy_ce"] == pytest.approx(_math.log(362), rel=1e-6)
         assert base["value_mse"] == pytest.approx(1.0, abs=1e-6)  # z in +-1
 
+    def test_evaluate_model_chunking_is_metric_invariant(self, tmp_path,
+                                                         monkeypatch):
+        """Chunked eval (P8b fix) is bit-identical to a single full-batch pass.
+
+        Regression: the original evaluate_model forwarded the WHOLE eval set
+        at once -- a 7.4GB activation tensor at b20c256 on 20k samples, which
+        OOMs the 6GB GPU and is pathologically slow on CPU. Metrics must not
+        depend on how the batch is sliced into EVAL_CHUNK chunks.
+        """
+        board = 9
+        ckpt = _p8_tiny_checkpoint(tmp_path / "tiny.pt", board)
+        data_dir = _p8_synthetic_chunks(tmp_path / "data", board,
+                                        sizes=[50, 50])
+        with PretrainChunks(data_dir) as chunks:
+            batch = chunks.sample_batch(_np.random.default_rng(7), 300)
+        model, _arch, _step = p8.load_eval_model(ckpt, CPU)
+
+        monkeypatch.setattr(p8, "EVAL_CHUNK", 300)  # one single chunk
+        one = p8.evaluate_model(model, batch, CPU)
+        monkeypatch.setattr(p8, "EVAL_CHUNK", 64)   # five chunks
+        many = p8.evaluate_model(model, batch, CPU)
+
+        assert many["n"] == one["n"] == 300
+        for k in ("top1", "top5", "policy_ce", "value_mse", "pearson"):
+            assert many[k] == pytest.approx(one[k], abs=1e-6)
+
 
 class TestP8Bench:
     def test_tiny_bench_end_to_end_winrate_dict(self, tmp_path):
@@ -395,3 +421,34 @@ class TestP8Report:
         assert "bench" in text
         assert "top-1" in text and "win rate" in text
         assert len(text.strip()) > 50
+
+    def test_report_includes_rl_smoke_section(self, tmp_path):
+        human = {"checkpoint": "models/pretrain.pt", "arch": {"blocks": 20,
+                 "channels": 256, "board_size": 19}, "model": {"top1": 0.4,
+                 "top5": 0.7, "policy_ce": 2.3, "value_mse": 0.23,
+                 "pearson": 0.8}}
+        bench = {"checkpoint": "models/pretrain.pt", "games": 2, "a_wins": 2,
+                 "b_wins": 0, "draws": 0, "winrate_a": 1.0, "winrate_b": 0.0,
+                 "avg_game_length": 120.0, "sims": 150, "board_size": 19,
+                 "komi": 7.5, "virtual_loss": 3,
+                 "opponent": {"checkpoint": None, "note": "random-init"}}
+        smoke = {
+            "todo": 16, "device": "cuda",
+            "init_checkpoint": "models/pretrain.pt",
+            "protocol": {"batch_size": 64, "simulations": 100},
+            "loop": {"steps_trained": 200, "games_generated": 1,
+                     "global_step_final": 60200, "loss_first": 9.77,
+                     "loss_last": 4.86, "loss_decrease": True},
+            "checkpoint": {"latest_exists": True},
+            "arch": {"blocks": 20, "channels": 256, "board_size": 19},
+        }
+        out = tmp_path / "report.txt"
+        path = p8.write_report(out, human, bench, smoke=smoke)
+        text = Path(path).read_text(encoding="utf-8")
+        assert "[3] RL warm-start smoke" in text
+        assert "9.77" in text and "4.86" in text
+        assert "60200" in text and "arch blocks=20 channels=256 board=19" in text
+        # the P8-code-phase "deferred until P6 finishes" note is gone now that
+        # the acceptance run actually executed
+        assert "deferred" not in text
+        assert "every number above is measured" in text
