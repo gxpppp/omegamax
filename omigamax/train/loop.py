@@ -88,7 +88,11 @@ from omigamax.train.evaluate import (
     read_last_elo,
 )
 from omigamax.train.loss import make_sgd_optimizer
-from omigamax.train.selfplay import DEFAULT_DATA_DIR, generate_games
+from omigamax.train.selfplay import (
+    DEFAULT_DATA_DIR,
+    MAX_SELFPLAY_WORKERS,
+    generate_games,
+)
 from omigamax.train.train import (
     DEFAULT_CHECKPOINT_DIR,
     DEFAULT_GRAD_CLIP,
@@ -642,6 +646,7 @@ def run_loop(
     pretrain_data_dir: "str | Path" = DEFAULT_PRETRAIN_DATA_DIR,
     leaf_batch: "int | None" = None,
     selfplay_fp16: bool = False,
+    selfplay_workers: int = 1,
 ) -> dict:
     """Run the self-play -> train -> eval-gate loop (interruptible, resumable).
 
@@ -680,6 +685,11 @@ def run_loop(
               else None))
     batch_size = int(batch_size if batch_size is not None
                      else cfg.get("batch_size", 128))
+    selfplay_workers = int(selfplay_workers)
+    if selfplay_workers < 1 or selfplay_workers > MAX_SELFPLAY_WORKERS:
+        raise ValueError(
+            f"selfplay_workers must be 1..{MAX_SELFPLAY_WORKERS} "
+            f"(6GB GPU cap), got {selfplay_workers}")
     eval_games = int(eval_games if eval_games is not None
                      else cfg.get("eval_games", DEFAULT_EVAL_GAMES))
     eval_sims = int(eval_sims if eval_sims is not None
@@ -874,14 +884,26 @@ def run_loop(
                 # identical to one generate_games(games=N) batch call.
                 rep = {"games": 0, "sims": 0, "wall_time_s": 0.0,
                        "sims_per_sec": 0.0}
-                for _ in range(games_per_cycle):
+                if selfplay_workers > 1:
+                    # P12: multi-process batch. N worker processes generate the
+                    # whole cycle's games in parallel -- each worker holds its
+                    # own model copy + evaluator + MCTS, so the serial MCTS
+                    # selection phases run on separate CPU cores while GPU
+                    # forwards from different workers overlap (raise avg GPU
+                    # util and sims/s on the idle-phase-bound loop). Seeds stay
+                    # continuous (seed + games_generated .. +games_per_cycle-1)
+                    # so the npz set is identical to the single-process batch.
+                    # Viz limitation: per-move frames are NOT streamed from
+                    # worker processes (each worker has its own private board);
+                    # the window instead gets one buffer-refresh frame after
+                    # the batch lands (push_selfplay_frame below).
                     r, _records = generate_games(
-                        model, cfg, games=1, data_dir=data_dir,
+                        model, cfg, games=games_per_cycle, data_dir=data_dir,
                         keep=keep_games, seed=int(seed) + games_generated,
                         simulations=simulations, max_moves=selfplay_max_moves,
-                        size=board_size, frame_callback=_per_move_frame,
-                        leaf_batch=leaf_batch, fp16=selfplay_fp16)
-                    games_generated += 1
+                        size=board_size, leaf_batch=leaf_batch,
+                        fp16=selfplay_fp16, workers=selfplay_workers)
+                    games_generated += games_per_cycle
                     buffer.refresh()
                     if viz.get("started"):
                         push_selfplay_frame(
@@ -892,6 +914,25 @@ def run_loop(
                     rep["games"] += int(r.get("games", 1))
                     rep["sims"] += int(r.get("sims", 0))
                     rep["wall_time_s"] += float(r.get("wall_time_s", 0.0))
+                else:
+                    for _ in range(games_per_cycle):
+                        r, _records = generate_games(
+                            model, cfg, games=1, data_dir=data_dir,
+                            keep=keep_games, seed=int(seed) + games_generated,
+                            simulations=simulations, max_moves=selfplay_max_moves,
+                            size=board_size, frame_callback=_per_move_frame,
+                            leaf_batch=leaf_batch, fp16=selfplay_fp16)
+                        games_generated += 1
+                        buffer.refresh()
+                        if viz.get("started"):
+                            push_selfplay_frame(
+                                viz, buffer, board_size,
+                                komi=float(cfg.get("komi", 7.5)),
+                                games=buffer.num_games, train_step=None,
+                                elo=current_elo)
+                        rep["games"] += int(r.get("games", 1))
+                        rep["sims"] += int(r.get("sims", 0))
+                        rep["wall_time_s"] += float(r.get("wall_time_s", 0.0))
                 rep["sims_per_sec"] = (
                     rep["sims"] / rep["wall_time_s"]
                     if rep["wall_time_s"] > 0 else 0.0)
@@ -910,22 +951,35 @@ def run_loop(
                 # time with a frame pushed after each (F3c).
                 buffer.refresh()
                 if buffer.num_games == 0:
-                    for _ in range(games_per_cycle):
+                    # Regenerate deterministically (same model, same seeds).
+                    # With workers>1 the whole cycle batch goes out at once
+                    # (same seed continuity as the start-of-cycle path).
+                    if selfplay_workers > 1:
                         generate_games(
-                            model, cfg, games=1, data_dir=data_dir,
+                            model, cfg, games=games_per_cycle, data_dir=data_dir,
                             keep=keep_games, seed=int(seed) + games_generated,
                             simulations=simulations,
                             max_moves=selfplay_max_moves,
-                            size=board_size, frame_callback=_per_move_frame,
-                            leaf_batch=leaf_batch, fp16=selfplay_fp16)
-                        games_generated += 1
-                        buffer.refresh()
-                        if viz.get("started"):
-                            push_selfplay_frame(
-                                viz, buffer, board_size,
-                                komi=float(cfg.get("komi", 7.5)),
-                                games=buffer.num_games, train_step=None,
-                                elo=current_elo)
+                            size=board_size, leaf_batch=leaf_batch,
+                            fp16=selfplay_fp16, workers=selfplay_workers)
+                        games_generated += games_per_cycle
+                    else:
+                        for _ in range(games_per_cycle):
+                            generate_games(
+                                model, cfg, games=1, data_dir=data_dir,
+                                keep=keep_games, seed=int(seed) + games_generated,
+                                simulations=simulations,
+                                max_moves=selfplay_max_moves,
+                                size=board_size, frame_callback=_per_move_frame,
+                                leaf_batch=leaf_batch, fp16=selfplay_fp16)
+                            games_generated += 1
+                    buffer.refresh()
+                    if viz.get("started"):
+                        push_selfplay_frame(
+                            viz, buffer, board_size,
+                            komi=float(cfg.get("komi", 7.5)),
+                            games=buffer.num_games, train_step=None,
+                            elo=current_elo)
                 elif viz.get("started"):
                     # games already on disk: push the newest one so the window
                     # shows a real board right away on resume.
@@ -1066,6 +1120,7 @@ def run_loop(
                 int(leaf_batch) if leaf_batch is not None
                 else int(cfg.get("leaf_batch", 16))),
             "selfplay_fp16": bool(selfplay_fp16),
+            "selfplay_workers": int(selfplay_workers),
             "grad_clip": grad_clip,
             "seed": int(seed),
             "resume": bool(resume),
@@ -1205,6 +1260,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="run self-play leaf inference under fp16 "
                              "autocast on CUDA (move numerics may shift "
                              "slightly but games stay legal)")
+    parser.add_argument("--selfplay-workers", type=int, default=1,
+                        help="parallel self-play worker processes (default 1 "
+                             "= today's per-game loop; 2-3 spawn child "
+                             "processes that each hold their own model copy "
+                             "+ MCTS so CPU cores parallelize the serial "
+                             "search phases and GPU forwards overlap -- "
+                             "per-move live viz is disabled; capped at 3 on "
+                             "the 6GB GPU, ~1.4GB fp16 per worker)")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (default 0)")
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
@@ -1294,6 +1357,7 @@ def main(argv: "list[str] | None" = None) -> int:
             pretrain_data_dir=args.pretrain_data_dir,
             leaf_batch=args.leaf_batch,
             selfplay_fp16=args.selfplay_fp16,
+            selfplay_workers=args.selfplay_workers,
         )
     except KeyboardInterrupt:
         # Interrupt landed outside run_loop's protected region (model load,

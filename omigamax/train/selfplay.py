@@ -57,7 +57,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -92,6 +94,10 @@ SOFT_GATE_SUGGESTION = (
     "enable fp16 autocast in the batched evaluator (config fp16), or use a "
     "smaller --simulations budget for the acceptance run."
 )
+# P12: cap on --selfplay-workers. Each worker process owns its own model copy
+# + CUDA context (~1.4GB at fp16 on the 6GB RTX 3060), so 3 workers sum to
+# ~4.2GB and stay under the 5GB safety ceiling; 4 would reach ~5.6GB -> OOM.
+MAX_SELFPLAY_WORKERS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +388,159 @@ def prune_old_games(data_dir: "str | Path", keep: int) -> list[str]:
 # batch generation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# multi-process batch generation (P12)
+# ---------------------------------------------------------------------------
+
+def _network_arch(network: torch.nn.Module) -> dict:
+    """Serializable arch description of a :class:`PolicyValueNetwork`.
+
+    Workers>1 need to rebuild an identical model from scratch in a fresh
+    process (a live module is not picklable across a Windows spawn), so the
+    parent passes ``{blocks, channels, board_size}`` + the CPU ``state_dict``
+    through the spawn initializer args instead of the module itself.
+    """
+    try:
+        return {
+            "blocks": int(network.blocks),
+            "channels": int(network.channels),
+            "board_size": int(network.board_size),
+        }
+    except AttributeError as exc:  # a custom net (ConstantNet & co.) has none
+        raise ValueError(
+            "generate_games(workers>1) requires a real PolicyValueNetwork "
+            f"(create_model); got {type(network).__name__}"
+        ) from exc
+
+
+def _worker_main(state_dict, arch, cfg, data_dir, device, base_seed,
+                 worker_index, workers, games, play_kwargs, out_q) -> None:
+    """Spawn target (module-level, picklable): play this worker's game slice.
+
+    Each worker process owns ONE model copy (rebuilt from ``state_dict`` +
+    ``arch``), its own :class:`BatchedNetworkEvaluator` and MCTS tree, and its
+    own CUDA context -- so MCTS serial phases run on separate CPU cores while
+    leaf-network forwards from different workers overlap on the GPU.
+
+    Seed distribution (deterministic, worker-count independent): game ``g`` of
+    the batch (0-based) always gets ``seed = base_seed + g``; this worker plays
+    the strided slice ``g in {worker_index, worker_index + workers, ...}``.
+    That guarantees the npz set for a given ``(seed, games)`` is identical to
+    the single-process path -- games are independent per seed.
+
+    Viz limitation (documented): the per-move ``frame_callback`` is NOT
+    forwarded from workers -- each worker has its own private board, so live
+    per-move frames are not feasible cheaply across processes. Callers that
+    want live viz use the buffer-refresh frame path (loop.py
+    :func:`push_selfplay_frame`) after the batch lands instead.
+
+    Results (``records`` + per-worker ``stats``) come back through ``out_q``,
+    one ``dict`` per worker.
+    """
+    device = torch.device(device)
+    network = create_model(
+        int(arch["blocks"]), int(arch["channels"]), int(arch["board_size"])
+    ).to(device)
+    network.load_state_dict(state_dict)
+    network.eval()
+    t0 = time.perf_counter()
+    records: list[dict] = []
+    sims = 0
+    positions = 0
+    for g in range(int(worker_index), int(games), int(workers)):
+        rec = play_game(network, cfg, seed=int(base_seed) + g, **play_kwargs)
+        rec["npz"] = save_game_npz(
+            rec, Path(data_dir) / f"game_{rec['seed']:010d}.npz")
+        records.append(rec)
+        sims += int(rec["sims"])
+        positions += int(rec["move_count"])
+    wall = time.perf_counter() - t0
+    out_q.put({
+        "records": records,
+        "stats": {
+            "worker_index": int(worker_index),
+            "games": len(records),
+            "positions": positions,
+            "sims": sims,
+            "wall_time_s": wall,
+            "sims_per_sec": sims / wall if wall > 0 else 0.0,
+        },
+    })
+
+
+def _generate_games_parallel(network, cfg, games, data_dir, seed, workers,
+                             play_kwargs) -> tuple[list[dict], float, list[dict]]:
+    """Spawn ``workers`` processes; each generates its strided game slice.
+
+    Returns ``(records, wall_time_s, worker_stats)``.
+
+    ``wall_time_s`` is the *parent* batch wall clock (process spawn + model
+    reload + CUDA init per worker included) -- the honest end-to-end number
+    compared against the single-process baseline. Per-worker generation-only
+    timings live in ``worker_stats``. ``records`` are sorted by seed so the
+    returned list matches the single-process ordering (``seed + 0 .. N-1``).
+
+    Results are drained from ``out_q`` in a background thread WHILE the parent
+    joins: several workers pushing multi-MB records through one pipe would
+    otherwise fill the pipe buffer and deadlock the join (each worker blocks in
+    ``put`` until the reader consumes). The thread keeps the pipe drained; a
+    crashed worker is detected via its non-zero ``exitcode`` after ``join``.
+    """
+    ctx = multiprocessing.get_context("spawn")  # Windows-safe, picklable args
+    state_dict = {k: v.detach().cpu() for k, v in network.state_dict().items()}
+    arch = _network_arch(network)
+    device = str(next(network.parameters()).device)
+    out_q = ctx.SimpleQueue()
+    t0 = time.perf_counter()
+    procs = [
+        ctx.Process(
+            target=_worker_main,
+            args=(state_dict, arch, cfg, str(data_dir), device,
+                  int(seed), w, workers, int(games), play_kwargs, out_q),
+        )
+        for w in range(workers)
+    ]
+    for p in procs:
+        p.start()
+
+    # Drain results concurrently with the join so a full pipe can never
+    # deadlock the parent (see docstring). The thread is daemonic so a worker
+    # that crashed without putting cannot block this process's exit.
+    results: list = []
+
+    def _drain() -> None:
+        for _ in procs:
+            results.append(out_q.get())
+
+    threading.Thread(target=_drain, daemon=True, name="sp-worker-drain").start()
+    for p in procs:
+        p.join()
+    wall = time.perf_counter() - t0
+
+    failed = [i for i, p in enumerate(procs) if p.exitcode not in (0, None)]
+    if failed:
+        raise RuntimeError(
+            f"self-play worker process(es) exited with error: {failed} "
+            "(see the worker traceback above; common causes: CUDA OOM, "
+            "unpicklable **play_kwargs).")
+    # all workers exited 0 -> each put exactly one item; wait briefly for the
+    # daemon drain thread to finish copying them into ``results``.
+    deadline = time.perf_counter() + 10.0
+    while len(results) < workers and time.perf_counter() < deadline:
+        time.sleep(0.05)
+    if len(results) != workers:
+        raise RuntimeError(
+            f"expected {workers} worker result(s), collected {len(results)}")
+
+    records = []
+    for item in results:
+        records.extend(item["records"])
+    records.sort(key=lambda r: int(r["seed"]))
+    worker_stats = [item["stats"] for item in results]
+    worker_stats.sort(key=lambda s: int(s["worker_index"]))
+    return records, wall, worker_stats
+
+
 def generate_games(
     network: torch.nn.Module,
     cfg: dict,
@@ -390,6 +549,7 @@ def generate_games(
     keep: "int | None" = None,
     seed: int = 0,
     frame_callback=None,
+    workers: int = 1,
     **play_kwargs,
 ) -> tuple[dict, list[dict]]:
     """Generate ``games`` self-play games, save one npz per game, prune.
@@ -403,19 +563,63 @@ def generate_games(
     ``frame_callback`` (optional) is forwarded to :func:`play_game`: it is
     invoked with the live board after EVERY move of every game (see
     :func:`play_game`). ``None`` (default) keeps behavior identical.
+
+    ``workers`` (P12, default 1): number of processes. ``workers=1`` is the
+    exact single-process path (byte-identical to pre-P12). ``workers>1`` spawns
+    ``workers`` child processes (Windows ``spawn``); each child loads the model
+    checkpoint once (the parent's ``state_dict`` + arch are serialized through
+    the spawn initializer args), builds its own evaluator + MCTS, and plays a
+    strided slice of the games so GPU forwards overlap while CPU cores
+    parallelize the serial MCTS phases. Constraints:
+
+    * Valid range ``1 .. MAX_SELFPLAY_WORKERS`` (3): each fp16 worker holds its
+      own ~1.4GB model copy on the 6GB GPU, so 3 workers (~4.2GB) is the safe
+      ceiling -- ``workers<1`` or ``workers>3`` raises ``ValueError``.
+    * The network must be a :class:`~omigamax.network.model.PolicyValueNetwork`
+      (rebuildable from ``blocks/channels/board_size`` + ``state_dict``); a
+      live module cannot cross a Windows spawn boundary.
+    * Per-move ``frame_callback`` frames are NOT streamed from workers (each
+      worker owns a private board) -- document this and rely on the buffer-
+      refresh viz path for workers>1.
+    * ``report["wall_time_s"]`` is the batch wall clock including spawn/reload;
+      ``report["per_worker"]`` holds per-worker generation-only timings.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     keep = int(keep if keep is not None else cfg.get("replay_buffer_games", 1000))
+    games = int(games)
+    workers = int(workers)
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    if workers > MAX_SELFPLAY_WORKERS:
+        raise ValueError(
+            f"workers={workers} exceeds the cap of {MAX_SELFPLAY_WORKERS}: "
+            "each fp16 worker holds its own ~1.4GB model copy on the 6GB GPU "
+            "(3 workers ~= 4.2GB is the safe ceiling; 4 risks OOM). "
+            "Use --selfplay-workers 1..3.")
     t0 = time.perf_counter()
-    records: list[dict] = []
-    for g in range(int(games)):
-        rec = play_game(
-            network, cfg, seed=seed + g, frame_callback=frame_callback,
-            **play_kwargs)
-        rec["npz"] = save_game_npz(rec, data_dir / f"game_{rec['seed']:010d}.npz")
-        records.append(rec)
-    wall = time.perf_counter() - t0
+    if workers == 1:
+        records: list[dict] = []
+        for g in range(games):
+            rec = play_game(
+                network, cfg, seed=seed + g, frame_callback=frame_callback,
+                **play_kwargs)
+            rec["npz"] = save_game_npz(
+                rec, data_dir / f"game_{rec['seed']:010d}.npz")
+            records.append(rec)
+        wall = time.perf_counter() - t0
+        worker_stats = [{
+            "worker_index": 0,
+            "games": len(records),
+            "positions": sum(r["move_count"] for r in records),
+            "sims": sum(r["sims"] for r in records),
+            "wall_time_s": wall,
+            "sims_per_sec": (sum(r["sims"] for r in records) / wall
+                             if wall > 0 else 0.0),
+        }]
+    else:
+        records, wall, worker_stats = _generate_games_parallel(
+            network, cfg, games, data_dir, int(seed), workers, play_kwargs)
 
     pruned = prune_old_games(data_dir, keep)
     total_sims = sum(r["sims"] for r in records)
@@ -434,6 +638,9 @@ def generate_games(
         "simulations_per_move": records[0]["simulations"] if records else None,
         "npz_files": sorted(p.name for p in data_dir.glob("*.npz")),
     }
+    if workers > 1:
+        report["workers"] = workers
+        report["per_worker"] = worker_stats
     return report, records
 
 
@@ -454,7 +661,7 @@ def _per_game_summary(record: dict) -> dict:
     }
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="omigamax todo-13 self-play data generator: "
                     "plays full games, writes (s, pi, z) npz per game, "
@@ -494,6 +701,13 @@ def main(argv: "list[str] | None" = None) -> int:
                              "slightly but games stay legal)")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (games use seed + index)")
+    parser.add_argument("--selfplay-workers", type=int, default=1,
+                        help="parallel worker processes (default 1 = the "
+                             "single-process path; 2-3 spawn child processes "
+                             "that each hold their own model copy + MCTS so "
+                             "CPU cores parallelize the serial search phases "
+                             "and GPU forwards overlap; capped at 3 on the "
+                             "6GB GPU ~1.4GB fp16 per worker)")
     parser.add_argument("--config", type=str, default=None,
                         help="config YAML path (default: config/default.yaml)")
     parser.add_argument("--evidence", type=str, default=None,
@@ -501,6 +715,11 @@ def main(argv: "list[str] | None" = None) -> int:
                              ".omo/evidence/omigamax-go/task-13-selfplay.json)")
     parser.add_argument("--no-log", action="store_true",
                         help="skip the logs/selfplay.jsonl throughput line")
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -540,6 +759,7 @@ def main(argv: "list[str] | None" = None) -> int:
         max_moves=args.max_moves,
         leaf_batch=args.leaf_batch,
         fp16=args.fp16,
+        workers=args.selfplay_workers,
     )
 
     warned = report["sims_per_sec"] < SOFT_SIMS_PER_SEC_WARN
@@ -560,6 +780,7 @@ def main(argv: "list[str] | None" = None) -> int:
             "data_dir": report["data_dir"],
             "keep_games": report["keep_games"],
             "master_seed": args.seed,
+            "selfplay_workers": args.selfplay_workers,
             "dirichlet_alpha": float(cfg.get("dirichlet_alpha", DEFAULT_DIRICHLET_ALPHA)),
             "dirichlet_eps": float(cfg.get("dirichlet_eps", DEFAULT_DIRICHLET_EPS)),
         },
