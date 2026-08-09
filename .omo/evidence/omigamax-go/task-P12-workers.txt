@@ -1,0 +1,93 @@
+================================================================================
+task-P12: 多进程并行自对弈 --selfplay-workers (GPU 利用率再提升)
+================================================================================
+HEAD parent: 265211f | date: 2026-08-09 | GPU: RTX 3060 Laptop 6GB (2.13.0+cu130)
+code commit: 041c908 "feat(selfplay): 多进程并行自对弈 --selfplay-workers" | evidence commit follows | push: both pushed (GCM_INTERACTIVE=never) or error noted below
+
+DESIGN
+- generate_games(network, cfg, games, ..., workers=1, **play_kwargs): workers=1
+  keeps the exact pre-P12 single-process path (byte-identical; report keys
+  unchanged). workers>1 spawns N child processes (multiprocessing.get_context
+  ("spawn") -- Windows-safe); each child rebuilds its own model copy from the
+  parent's serialized state_dict + arch {blocks,channels,board_size} passed
+  through the spawn initializer args (a live module cannot cross spawn), builds
+  its own BatchedNetworkEvaluator + MCTS, and plays its strided slice of the
+  batch. Worker device mirrors the parent network's device.
+- SEED DISTRIBUTION (deterministic, worker-count independent): game g of the
+  batch always gets seed = base_seed + g; worker w plays
+  {w, w+workers, w+2*workers, ...}. Same (seed, games) => same npz set for any
+  workers count -- proven by array-equality tests (workers=2/3 == workers=1).
+- RESULT TRANSPORT: each worker puts {records, stats} on ONE ctx.SimpleQueue.
+  The parent drains it in a daemon thread WHILE join()-ing -- a few workers
+  pushing multi-MB records through a full pipe while the parent only joins
+  would deadlock (both workers block in put until the reader consumes); the
+  drain thread keeps the pipe flowing. Worker crashes are caught via non-zero
+  exitcode after join -> RuntimeError.
+- REPORT: for workers>1 adds report["workers"] and report["per_worker"]
+  [{worker_index, games, positions, sims, wall_time_s, sims_per_sec}];
+  report["wall_time_s"] is the parent batch wall incl. spawn/reload, while
+  per_worker carries generation-only timing. Records returned seed-sorted.
+- VIZ LIMITATION (documented): per-move frame_callback frames are NOT streamed
+  from worker processes (each worker owns a private board; not feasible
+  cheaply across processes) -- the callback is simply not forwarded for
+  workers>1 (test asserts no crash + no frames). run_loop's workers>1 path
+  still pushes one buffer-refresh frame per completed batch via
+  push_selfplay_frame; seeds stay continuous so the npz set is identical to
+  the single-process batch.
+- VALIDATION / GPU cap: workers must be 1..MAX_SELFPLAY_WORKERS=3. Measured
+  peak memory: w1 1339MiB, w2 ~2.0GB, w3 ~2.3GB (b20c256 fp16 lb16) -- 3
+  workers stays well under the 5GB ceiling, so the cap of 3 is kept (4 would
+  be ~2.9GB but is out of scope; error message documents the cap).
+- PLUMBING: run_loop(selfplay_workers=1) + CLI --selfplay-workers N (loop) and
+  --selfplay-workers N (selfplay CLI); selfplay CLI gains a testable
+  _build_parser(). With workers>1 run_loop sends ONE batched
+  generate_games(games=games_per_cycle, workers=N) instead of N per-game calls.
+
+TESTS (tests/test_selfplay_workers.py, 18 new)
+  test_workers2_matches_workers1_npz_set    -- (a) same seeds => identical npz
+                                               arrays + records (5x5 net, CPU)
+  test_workers3_matches_workers1            -- (a) workers=3 also identical
+  test_workers_defaults_to_one              -- (b) workers param default 1
+  test_loop_parser_exposes_selfplay_workers -- (b) loop CLI flag default/plumb
+  test_run_loop_batches_with_workers        -- (b) workers>1 -> one batched call
+  test_run_loop_default_keeps_per_game_calls-- (b) workers=1 -> today's per-game loop
+  test_selfplay_cli_parser_accepts_workers  -- (b) selfplay CLI flag
+  test_selfplay_cli_threads_workers_into_evidence -- (b) end-to-end CLI workers=2
+  test_nonpositive_rejected / test_above_cap_rejected -- (c) workers<=0 and >3
+                                               rejected (ValueError)
+  test_run_loop_rejects_out_of_range        -- (c) run_loop guard
+  test_report_shape_and_totals              -- (d) workers/per_worker breakdown
+  test_workers1_report_unchanged_shape      -- (d) workers=1 report keys untouched
+  test_workers1_forwards_callback / test_workers2_ignores_callback_no_crash
+                                            -- frame_callback viz limitation
+pytest total: 516 passed (498 baseline + 18 new), 67.3s, no failures.
+
+EXPERIMENT (P10 methodology: serial runs, one config at a time, real b20c256
+models/pretrain.pt, 150 sims, fp16 leaf_batch 16, max_moves 150, nvidia-smi
+~1s sampling, startup zero-util spawn excluded for the "busy" util window)
+  workers  games  sims/s   avg util%(busy)  %samples>=90  peakMiB  wall/game
+  1        2      205.6    31.9             0.0           1339     109.4s
+  2        2      381.5    47.9             0.0           1997     59.0s
+  3        2      377.2    47.1             0.0           1994     59.7s  (one worker idle: 2 games / 3 workers)
+  -- fair follow-up (one game per worker) --
+  2        4      307.4    52.5             0.0           2072     73.2s  (2 games/worker, sustained thermal)
+  3        3      455.4    57.9             0.0           2302     49.4s  (fair 3-active-worker run)
+  Notes: %samples>=90 is 0 for ALL configs -- the 3060 saturates around
+  50-60% at leaf_batch 16 (P11: lb32/64 add <=0.4%); parallel workers roughly
+  DOUBLE avg util (31.9 -> 47.9 at w2, -> 57.9 at w3) while sims/s rises
+  205.6 -> 381.5 (1.86x) -> 455.4 (2.22x). Per-worker per-game time grows
+  under contention (115s at 2 workers -> 145s at 3) but total batch wall
+  shrinks because 3 games overlap. Peak memory 2.3GB << 5GB => 3 workers is
+  SAFE (no need to fall back to 2). Legality: structurally guaranteed -- MCTS
+  only explores legal_actions (illegal moves carry zero pi mass) and the
+  rules engine is unchanged; state_dict fidelity proven by the determinism
+  tests.
+
+WINNER: --selfplay-workers 3 --selfplay-fp16 (selfplay CLI: --fp16
+  --selfplay-workers 3 --model models/pretrain.pt). 455.4 sims/s = 2.22x over
+  the workers=1 fp16 baseline (205.6), avg GPU util 31.9% -> 57.9%.
+
+NOT-TOUCHED: config/default.yaml, data/pretrain, train.py/buffer.py/pretrain.py,
+RL loop not started (later task restarts it), workers=1 single-process path
+byte-identical (498 pre-existing tests stayed green).
+================================================================================
