@@ -103,6 +103,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--amp", action="store_true",
                     help="train with fp16 autocast + GradScaler (AMP; opt-in, "
                          "default off -- the deterministic fp32 path is unchanged)")
+    ap.add_argument("--no-prefetch", action="store_true",
+                    help="disable the async CPU-side batch prefetch (default "
+                         "on: a daemon thread samples the next batch while the "
+                         "GPU steps, raising GPU utilization)")
     return ap
 
 
@@ -156,6 +160,7 @@ def main(argv: "list[str] | None" = None) -> int:
             "grad_clip": args.grad_clip, "lr_steps": list(args.lr_steps),
             "batch_size": args.batch_size, "seed": args.seed,
             "amp": bool(args.amp),
+            "prefetch": not bool(args.no_prefetch),
         }
         extra = {"total_positions": report["total_positions"],
                  "resumed": resumed}
@@ -182,6 +187,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 lr_steps=tuple(args.lr_steps) if args.lr_steps else (),
                 log_path=args.log_path, log_every=args.log_every,
                 amp=bool(args.amp),
+                prefetch=not bool(args.no_prefetch),
             )
             metrics.extend(m)
             steps_left -= chunk

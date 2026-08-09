@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -198,6 +200,105 @@ class PretrainChunks:
 
 
 # ---------------------------------------------------------------------------
+# async prefetch: overlap CPU-side sampling with GPU compute
+# ---------------------------------------------------------------------------
+
+def _prepare_batch(batch: dict) -> dict:
+    """Pre-convert a sampled batch to the torch-ready dtypes/contiguity.
+
+    Runs in the producer thread so the ``(B,17,19,19)`` uint8->float32 etc.
+    conversions never touch the main loop. Consumers like :func:`pretrain_step`
+    do exactly these conversions themselves (and are dtype-tolerant), so a
+    prepared batch is interchangeable with a raw one -- only the CPU work
+    moves off the hot path.
+    """
+    return {
+        "s": np.ascontiguousarray(batch["s"], dtype=np.float32),
+        "pi": np.ascontiguousarray(batch["pi"], dtype=np.int64),
+        "z": np.ascontiguousarray(batch["z"], dtype=np.float32),
+    }
+
+
+class _PrefetchSampler:
+    """Background batch producer: overlap CPU sampling with GPU compute.
+
+    A single daemon thread owns its own seeded ``np.random.Generator`` and
+    loops ``chunks.sample_batch`` -> :func:`_prepare_batch`, handing each
+    finished batch to the caller through a size-1 ``queue.Queue`` -- a classic
+    double buffer where the worker is always exactly one batch ahead, so the
+    next step's sampling overlaps this step's GPU work.
+
+    *Thread, not process:* the hot path is numpy mmap reading (random ints,
+    ``searchsorted``, fancy indexing of the mmap arrays, ``concatenate``), all
+    C code that releases the GIL, so a thread overlaps the torch main thread
+    at zero IPC cost. A subprocess would additionally have to re-open the
+    chunk mmaps in the child (mmap handles don't inherit across Windows'
+    spawn) and pickle multi-MB batches through a pipe -- strictly worse here.
+
+    Sampling stays i.i.d. and deterministic per seed: the worker's generator
+    is seeded once (by the caller, from the persistent run RNG) and consumed
+    strictly in batch order, so timing never changes the produced stream.
+    """
+
+    def __init__(self, chunks: PretrainChunks, batch_size: int,
+                 seed: int = 0, maxsize: int = 1) -> None:
+        self._chunks = chunks
+        self._batch_size = int(batch_size)
+        self._rng = np.random.default_rng(int(seed))
+        self._queue: "queue.Queue" = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._failed: "BaseException | None" = None
+        self._thread = threading.Thread(
+            target=self._run, name="pretrain-prefetch", daemon=True,
+        )
+
+    def start(self) -> "_PrefetchSampler":
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                batch = self._chunks.sample_batch(self._rng, self._batch_size)
+                if self._stop.is_set():
+                    break
+                self._queue.put(_prepare_batch(batch))
+        except BaseException as exc:  # never die silently: surface to caller
+            self._failed = exc
+            try:
+                while True:
+                    self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._queue.put(None)  # sentinel: unblock a main-thread get()
+
+    def get(self) -> dict:
+        """Return the next prepared batch (blocks until it is ready)."""
+        item = self._queue.get()
+        if item is None:
+            raise RuntimeError(
+                "prefetch sampler failed"
+                + (f": {self._failed!r}" if self._failed is not None else "")
+            ) from self._failed
+        return item
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Request shutdown and join the worker (safe to call once).
+
+        Drains the queue (no sentinel -- a sentinel would occupy the single
+        slot and deadlock a worker that is mid-``put``), so a worker blocked
+        on ``put`` completes its batch, sees the stop event and exits.
+        """
+        self._stop.set()
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+        self._thread.join(timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
 # lr schedule / one optimizer step / run loop
 # ---------------------------------------------------------------------------
 
@@ -316,18 +417,30 @@ def run_pretrain(
     log_path: "str | os.PathLike | None" = None,
     log_every: int = 10,
     amp: bool = False,
+    prefetch: bool = True,
 ) -> tuple[list[dict], int, "np.random.Generator"]:
     """Train ``steps`` supervised steps; return ``(metrics, global_step, rng)``.
 
-    Per step: set the scheduled lr, sample a uniform batch via the persistent
-    ``rng``, run one :func:`pretrain_step`, append metrics (loss components,
-    top-1 policy accuracy vs the human move, lr) and JSONL-log every
-    ``log_every`` steps. ``global_step`` advances by one and the mutable
-    ``rng`` is returned (persist both for exact resume).
+    Per step: set the scheduled lr, get a uniform batch, run one
+    :func:`pretrain_step`, append metrics (loss components, top-1 policy
+    accuracy vs the human move, lr) and JSONL-log every ``log_every`` steps.
+    ``global_step`` advances by one and the mutable ``rng`` is returned
+    (persist both for exact resume).
 
     ``amp=True`` runs each step with fp16 ``autocast`` + a persistent
     ``torch.amp.GradScaler`` (opt-in; requires CUDA -- raises ``ValueError``
     otherwise). ``False`` (default) is the deterministic fp32 path.
+
+    ``prefetch=True`` (default) runs an async :class:`_PrefetchSampler`: a
+    daemon thread samples the next batch while the main thread runs the GPU
+    step, so the ~350 ms/step CPU-side mmap sampling overlaps GPU compute
+    (the P10 "GPU util 56% ceiling" fix). Sampling is i.i.d.; with prefetch
+    the worker's generator is seeded by drawing once from the persistent
+    ``rng`` per call (so distinct blocks / resumes sample distinct streams),
+    and a fixed ``seed`` still reproduces a run exactly. ``rng`` is advanced
+    by exactly that one draw per call and returned as usual, so checkpoint
+    round-trips and ``--resume`` are unchanged. ``prefetch=False`` keeps the
+    original fully-serial sampling driven directly by ``rng``.
     """
     if rng is None:
         rng = np.random.default_rng(seed)
@@ -336,6 +449,14 @@ def run_pretrain(
     if amp and device.type != "cuda":
         raise ValueError("amp=True requires a CUDA device")
     scaler = torch.amp.GradScaler("cuda") if amp else None
+    sampler = None
+    if prefetch and int(steps) > 0:
+        # draw the worker's stream seed from the persistent rng (one draw per
+        # call); the worker never touches `rng` again, so the returned rng
+        # state is a faithful, checkpointable continuation point.
+        sampler = _PrefetchSampler(
+            chunks, int(batch_size), seed=int(rng.integers(0, 2**32 - 1))
+        ).start()
     metrics: list[dict] = []
     log_fh = None
     try:
@@ -345,7 +466,10 @@ def run_pretrain(
         for _ in range(int(steps)):
             lr = pretrain_lr(global_step, lr_base, lr_steps)
             set_learning_rate(optimizer, lr)
-            batch = chunks.sample_batch(rng, int(batch_size))
+            if sampler is not None:
+                batch = sampler.get()
+            else:
+                batch = chunks.sample_batch(rng, int(batch_size))
             m = pretrain_step(
                 model, optimizer, batch, device=device, grad_clip=grad_clip,
                 scaler=scaler,
@@ -358,6 +482,8 @@ def run_pretrain(
                 log_fh.flush()
             global_step += 1
     finally:
+        if sampler is not None:
+            sampler.stop()
         if log_fh is not None:
             log_fh.close()
     return metrics, int(global_step), rng

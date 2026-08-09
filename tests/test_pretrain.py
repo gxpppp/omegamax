@@ -291,7 +291,12 @@ def test_pretrain_lr_schedule_empty_steps_is_constant():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_pretrain_run_amp_tiny_9x9_20_steps_finite_and_decreasing(tmp_path):
     """AMP run on a tiny 9x9 model (blocks=1, channels=8), 20 steps: loss stays
-    finite (no NaNs) and decreases -- the autocast+GradScaler path trains."""
+    finite (no NaNs) and decreases -- the autocast+GradScaler path trains.
+
+    Uses ``prefetch=False`` so the assertion keys off the deterministic serial
+    stream (the intent here is AMP correctness, not sampling). The async
+    prefetch path is covered by tests/test_pretrain_prefetch.py.
+    """
     board = 9
     data_dir = make_synthetic_chunks(tmp_path / "data", board, sizes=[256])
     torch.manual_seed(0)
@@ -301,7 +306,7 @@ def test_pretrain_run_amp_tiny_9x9_20_steps_finite_and_decreasing(tmp_path):
         metrics, step, _ = run_pretrain(
             model, optimizer, chunks, steps=20, rng=np.random.default_rng(0),
             global_step=0, batch_size=16, device=DEVICE, lr_base=0.02,
-            lr_steps=(), amp=True,
+            lr_steps=(), amp=True, prefetch=False,
         )
     assert step == 20 and len(metrics) == 20
     losses = [m["loss_total"] for m in metrics]
