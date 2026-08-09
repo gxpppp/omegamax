@@ -1,0 +1,28 @@
+========================================================================
+P8 acceptance evaluation report -- omigamax pretrained net
+========================================================================
+generated : 2026-08-09T19:51:28
+checkpoint: models/pretrain.pt
+arch      : blocks=20 channels=256 board=19
+
+[1] human-match -- SL accuracy on a held-out eval set
+------------------------------------------------------------------------
+  eval set : 20000 positions sampled on the fly from data/pretrain with fixed seed 24301 (no files written to data/pretrain)
+  model    : top-1 40.85%   top-5 73.22%   policy CE 2.2676   value MSE 0.2289   value corr +0.877
+  random   : top-1 0.22%   top-5 1.31%   policy CE 5.8916   value MSE 1.0000   value corr +0.000   (uniform floor over 362 moves)
+  top-1 lift over random floor: +40.63 pp
+
+[2] bench -- checkpoint vs baseline (MCTS, alternating colors)
+------------------------------------------------------------------------
+  opponent : untrained random-init baseline (create_model default init)
+  protocol : 10 games, 150 sims/move, board 19, komi 7.5, virtual-loss 3, no Dirichlet noise, tau=0
+  result   : checkpoint 10 wins / 0 losses / 0 draws -> win rate 100.0% (baseline 0.0%)
+  game len : avg 236 moves across 10 games
+
+[3] RL warm-start smoke (P7b -- 200-step finetune smoke)
+------------------------------------------------------------------------
+  run      : warm-started from models/pretrain.pt on cuda; 200 train steps (batch 256), 2 self-play game(s) at 150 sims/move
+  loss     : 7.8851 -> 1.5724 (finite, decrease=True)
+  latest.pt: True  global_step 60200  arch blocks=20 channels=256 board=19
+
+note: acceptance run executed on the trained checkpoint -- human-match + bench on models/pretrain.pt plus the 200-step RL warm-start smoke; every number above is measured (see also task-P9-accept.txt for the per-criterion verdict).

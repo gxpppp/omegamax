@@ -1,0 +1,124 @@
+{
+  "mode": "bench",
+  "checkpoint": "models/pretrain.pt",
+  "arch_a": {
+    "blocks": 20,
+    "channels": 256,
+    "board_size": 19
+  },
+  "global_step_a": 60000,
+  "opponent": {
+    "checkpoint": null,
+    "arch": {
+      "blocks": 20,
+      "channels": 256,
+      "board_size": 19
+    },
+    "note": "untrained random-init baseline (create_model default init)"
+  },
+  "games": 10,
+  "sims": 150,
+  "board_size": 19,
+  "komi": 7.5,
+  "virtual_loss": 3,
+  "seed": 24301,
+  "wall_time_s": 5743.04,
+  "a_wins": 10,
+  "b_wins": 0,
+  "draws": 0,
+  "winrate_a": 1.0,
+  "winrate_b": 0.0,
+  "avg_game_length": 235.8,
+  "games_detail": [
+    {
+      "seed": 24301,
+      "winner": "B",
+      "result": "B+64.5",
+      "forced_terminal": false,
+      "moves": 220,
+      "a_color": "B",
+      "a_won": true
+    },
+    {
+      "seed": 24302,
+      "winner": "W",
+      "result": "W+44.5",
+      "forced_terminal": false,
+      "moves": 193,
+      "a_color": "W",
+      "a_won": true
+    },
+    {
+      "seed": 24303,
+      "winner": "B",
+      "result": "B+18.5",
+      "forced_terminal": false,
+      "moves": 188,
+      "a_color": "B",
+      "a_won": true
+    },
+    {
+      "seed": 24304,
+      "winner": "W",
+      "result": "W+132.5",
+      "forced_terminal": true,
+      "moves": 300,
+      "a_color": "W",
+      "a_won": true
+    },
+    {
+      "seed": 24305,
+      "winner": "B",
+      "result": "B+58.5",
+      "forced_terminal": false,
+      "moves": 214,
+      "a_color": "B",
+      "a_won": true
+    },
+    {
+      "seed": 24306,
+      "winner": "W",
+      "result": "W+123.5",
+      "forced_terminal": true,
+      "moves": 300,
+      "a_color": "W",
+      "a_won": true
+    },
+    {
+      "seed": 24307,
+      "winner": "B",
+      "result": "B+36.5",
+      "forced_terminal": false,
+      "moves": 206,
+      "a_color": "B",
+      "a_won": true
+    },
+    {
+      "seed": 24308,
+      "winner": "W",
+      "result": "W+131.5",
+      "forced_terminal": true,
+      "moves": 300,
+      "a_color": "W",
+      "a_won": true
+    },
+    {
+      "seed": 24309,
+      "winner": "B",
+      "result": "B+64.5",
+      "forced_terminal": false,
+      "moves": 220,
+      "a_color": "B",
+      "a_won": true
+    },
+    {
+      "seed": 24310,
+      "winner": "W",
+      "result": "W+64.5",
+      "forced_terminal": false,
+      "moves": 217,
+      "a_color": "W",
+      "a_won": true
+    }
+  ]
+}

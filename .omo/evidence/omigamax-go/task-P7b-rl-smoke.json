@@ -1,0 +1,61 @@
+{
+  "todo": 16,
+  "device": "cuda",
+  "protocol": {
+    "cycles": 1000000,
+    "games_per_cycle": 2,
+    "steps_per_cycle": 1000,
+    "steps_budget": 200,
+    "simulations": 150,
+    "selfplay_max_moves": 300,
+    "batch_size": 256,
+    "eval_games": 21,
+    "eval_sims": 200,
+    "eval_interval_steps": 2000,
+    "eval_max_moves": 1000,
+    "replace_threshold": 0.55,
+    "symmetry_aug": true,
+    "fp16": true,
+    "grad_clip": 1.0,
+    "seed": 0,
+    "resume": false,
+    "resumed": false,
+    "init_checkpoint": "models/pretrain.pt",
+    "board_size": 19,
+    "force_final_eval": false,
+    "viz_enabled": false,
+    "viz": {
+      "started": false,
+      "reason": "disabled_by_config"
+    },
+    "lr": 0.2,
+    "lr_schedule_steps": [
+      50000,
+      100000
+    ],
+    "data_dir": "data\\selfplay_rl_smoke",
+    "checkpoint_dir": "models",
+    "train_log": "logs\\train_rl_smoke.jsonl",
+    "history": "logs\\eval_history_rl_smoke.jsonl"
+  },
+  "loop": {
+    "interrupted": false,
+    "resumed": false,
+    "steps_trained": 200,
+    "global_step_final": 60200,
+    "games_generated": 2,
+    "cycles_done": 0,
+    "loss_first": 7.885065078735352,
+    "loss_last": 1.5724419951438904,
+    "loss_decrease": true,
+    "eval_gates": 0,
+    "eval_summaries": []
+  },
+  "checkpoint": {
+    "latest": "models\\latest.pt",
+    "latest_exists": true,
+    "best": "models\\best.pt",
+    "best_exists": true
+  },
+  "accepted": true
+}

@@ -1,0 +1,31 @@
+{
+  "mode": "human-match",
+  "checkpoint": "models/pretrain.pt",
+  "arch": {
+    "blocks": 20,
+    "channels": 256,
+    "board_size": 19
+  },
+  "global_step": 60000,
+  "data_dir": "data/pretrain",
+  "eval_samples": 20000,
+  "eval_seed": 24301,
+  "wall_time_s": 57.95,
+  "model": {
+    "n": 20000,
+    "top1": 0.4085,
+    "top5": 0.7322,
+    "policy_ce": 2.2676302642822264,
+    "value_mse": 0.22893304102420806,
+    "pearson": 0.8771930556676506
+  },
+  "random_baseline": {
+    "n": 20000,
+    "D": 362,
+    "top1": 0.0022,
+    "top5": 0.01305,
+    "policy_ce": 5.8916442118257715,
+    "value_mse": 1.0,
+    "pearson": 0.0
+  }
+}
