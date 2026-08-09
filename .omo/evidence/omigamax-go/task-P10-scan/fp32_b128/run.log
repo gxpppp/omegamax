@@ -1,0 +1,15 @@
+====================================================================
+P5 supervised pretraining smoke
+  device        : cuda  (NVIDIA GeForce RTX 3060 Laptop GPU)
+  arch          : blocks=20 channels=256 board=19 params=23,962,085
+  data          : 5,122,072 positions across 13 chunks
+  steps         : 120 (global_step 120)
+  batch size    : 128   lr 0.02  grad_clip 1.0  amp off
+  loss first    : total 7.9414 policy 6.7769 value 1.1646 top1 0.00%
+  loss last     : total 6.8247 policy 5.8344 value 0.9903 top1 0.00%
+  loss ratio    : 0.859
+  speed         : 914.8 ms/step (109.8s / 120 steps)
+  peak gpu mem  : 4.143 GB (budget 5.5 GB, OK)
+  checkpoint    : E:\AAAhuancun\betamaster\.omo\evidence\omigamax-go\task-P10-scan\fp32_b128\pretrain.pt (global_step 120)
+  jsonl log     : E:\AAAhuancun\betamaster\.omo\evidence\omigamax-go\task-P10-scan\fp32_b128\run.jsonl
+====================================================================

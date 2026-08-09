@@ -1,0 +1,87 @@
+冒烟训练性能扫描实验 (P10) — 2026-08-09
+=======================================
+
+硬件/环境: RTX 3060 Laptop 6GB (6144 MiB, 驱动 581.08, CUDA 13), b20c256
+(23,962,085 参数), torch fp32 基线 + 新 AMP (autocast fp16 + GradScaler)。
+数据: data/pretrain 13 chunks / 5,122,072 位置 / 29.29 GB (mmap)。
+
+方法: 每个 combo 独立进程串行运行 (互不并行, GPU 独占), `--steps 120
+--log-every 10 --save-every 100000 --checkpoint/--log-path 重定向到本目录
+子目录 (不触碰 models/pretrain.pt)`, 运行期间以 ~1s 间隔轮询
+`nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu`
+写入 samples.csv (轮询仅 driver 调用, 不占用 GPU 算力); ms/step 由
+jsonl 记录步进时间戳 (排除前 10 步 warmup, steps 10->110)。
+
+功能提交: 8114568 `feat(train): pretrain 可选 AMP 混合精度`
+(pytest 474 passed, 含 2 个新 AMP 用例; --amp 默认 OFF, fp32 路径不变)。
+
+组合表 (每 combo: ms/step | avg util% | 峰值显存 nvidia-smi/torch | loss first->last | status)
+--------------------------------------------------------------------------------------------
+| combo              | ms/step      | avg util% | peak mem GB (smi / torch) | loss first->last | status |
+| fp32 batch  64     | 472.5        | 46.5      | 3.667 / 2.149             | 7.87 -> 6.87     | ok     |
+| fp32 batch 128     | 903.2        | 60.8      | 5.439 / 4.143             | 7.94 -> 6.82     | ok     |
+| fp32 batch 192     | ~45 s/step (thrash)| 100*   | 5.966 / n/a               | 7.61 (step10)    | THRASH |
+| fp32 batch 256     | ~22 s/step (thrash)| 100*   | 5.984 / n/a               | 7.58 (step10)    | THRASH |
+| amp   batch 128    | 369.8        | 35.7      | 2.685 / 2.135             | 7.94 -> 6.83     | ok     |
+| amp   batch 192    | 523.3        | 43.4      | 3.661 / 3.065             | 7.95 -> 6.88     | ok     |
+| amp   batch 256    | 718.8        | 51.5      | 4.658 / 4.027             | 7.97 -> 6.84     | ok     |
+| amp   batch 320    | 914.4        | 56.4      | 5.562 / 4.949             | 7.97 -> 6.83     | ok     |
+| amp   batch 384    | ~14 s/step (thrash)| 100*  | 5.969 / n/a               | 7.34 (step10)    | THRASH |
+--------------------------------------------------------------------------------------------
+* 100% 采样期间 100% util 是 WDDM 换出到系统内存后的"假饱和" (见下)。
+fp32 192/256、amp 384 在 WDDM 下不报 CUDA OOM, 而是 6GB 显存触顶后换页到
+系统内存: ~1s 的步长膨胀到 21-52s, 显存钉在 ~5.97GB (顶到 6144MB 卡边缘)。
+有效结论 = "装不下" (与 OOM 等价, 记录为 THRASH/OOM)。
+
+吞吐 (samples/s = batch / ms_step):
+  fp32 b64=135  b128=142 | amp b128=346  b192=367  b256=356  b320=350
+
+关键发现
+--------
+1. AMP 带来 ~2.4x 提速 + 显存减半: amp b128 = 370ms/step vs fp32 b128 =
+   903ms/step; torch 峰值 2.135GB vs 4.143GB。AMP 损失轨迹与 fp32 基本一致
+   (amp b128 7.94->6.83 vs fp32 b128 7.94->6.82), 数值稳定无 NaN。
+2. fp32 上限在 batch 128 (torch 4.14GB, 卡级 5.44GB 已紧); batch 192+
+   fp32 换页 thrash。AMP 上限在 batch 320 (torch 4.95GB, 卡级 5.56GB=91%);
+   batch 384+ thrash。512 因 384 已触顶而跳过 (按计划停止扩展)。
+3. GPU 无法完全饱和: 最高可达 util 仅 ~56% (amp b320, 已在显存边缘)。
+   瓶颈是 CPU 侧数据路径 —— PretrainChunks 每步从 29GB mmap 语料随机采样
+   B 行 + H2D 传输 + 同步; 以 amp b256 为例每步 719ms 中约 350ms 为非 GPU
+   时间 (采样/传输/同步)。整卡饱和需要异步/预取数据管线, 属超范围改造。
+
+胜出配置 (推荐)
+---------------
+  uv run python -m omigamax.cli.pretrain --amp --batch-size 256 \
+      --blocks 20 --channels 256 --board-size 19 --lr 0.02 \
+      --steps <N> --save-every 5000
+
+依据:
+- 吞吐 (samples/s): b256=356, 与实测峰值 b192=367 仅差 3%, 但每步 2x 梯度
+  信息 (批更大, 每优化步梯度估计更准)。
+- 饱和: avg util 51.5% (46.5% 采样点 >=90%), 是所有"安全余量"配置中最高
+  (b320 的 56.4% 是以卡级 91% 显存、仅剩 ~0.6GB 余量为代价, 且吞吐反而
+  降到 350)。
+- 显存余量: torch 峰值 4.03GB = 卡容量的 66%, 留 ~1.5GB 缓冲; b320 达
+  80% torch / 91% 卡级, 一步尖峰就可能换页 thrash。
+- 速度: 719ms/step, 相对 b192 (523ms) 每步慢但每步做的功多, 墙钟吞吐相当,
+  GPU 占用更饱满。
+- 若优先"每步最快" (如限步数实验) 则选 amp --batch-size 128 (370ms/step);
+  若接受紧显存求最高 util 则选 amp --batch-size 320。
+
+胜出配置饱和度证据 (amp b256, 120 步运行)
+-----------------------------------------
+- avg util 51.5%, >=80% 占比 51.6%, >=90% 占比 46.5%, 峰值卡级显存 4.658GB
+  (torch 4.027GB), 平均温度 71.7C。
+- CPU 侧成本: 总墙钟 165.7s = 固定开销 ~80s (模型加载 + 29GB validate) +
+  120 步训练 ~86s; 每步非 GPU 时间 ~350ms (采样/传输/同步) 即 CPU 为吞吐
+  瓶颈的实证。
+- 稳定性 (120 步, 超过 30 步检查要求): loss 7.97 -> 6.84 单调下降且全有限,
+  无 NaN; 训练阶段显存平稳 (~4.6GB 卡级, 无增长泄漏), 无 CUDA 异常退出。
+
+证据文件 (本目录 task-P10-scan/<combo>/)
+----------------------------------------
+  samples.csv  (nvidia-smi 1s 采样: util/mem/temp)
+  run.jsonl    (逐 10 步 loss/lr/acc)
+  run.log      (CLI 汇总: speed, torch peak, loss first/last)
+  timing.json  (step->t, ms/step 计算源)
+  采集脚本: %TEMP%\opencode\p10\bench.py / analyze.py (不入库)
