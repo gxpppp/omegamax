@@ -1,0 +1,46 @@
+P14: workers>1 自对弈可视化退化修复 (task-P14-viz-fix)
+========================================================
+
+STATUS: DONE. HEAD 7555a7c + P14; full suite 524 passed (520 + 4 new).
+
+ROOT CAUSE
+----------
+--selfplay-workers 3 时, loop.py 的 workers>1 分支对整批
+games_per_cycle=100 局调用一次 generate_games(workers=N), 然后才
+buffer.refresh() + push_selfplay_frame。整个批次(~15-20 min)期间 pygame
+窗口停留在开局空棋盘, 用户看不到任何逐局进度。P12 移除了 worker 内的
+frame_callback 转发, 且父进程只在整个批次落盘后刷新一次 —— 即 P12 文档
+中承诺的 "one buffer-refresh frame per completed batch" 对 100 局/轮而言
+体验不足。
+
+DESIGN
+------
+1. selfplay.py generate_games 新增 progress_callback=None:
+   - 仅 workers>1 生效; workers==1 忽略(该路径已有逐局循环) — 文档化。
+   - _worker_main 改为逐局消息协议: 每局 save_game_npz(os.replace 原子,
+     文件已可见)之后 put {"type":"game","record":rec}, 收尾 put
+     {"type":"stats","stats":{...}}。顺序已核实: npz 写盘先于消息发送。
+   - _generate_games_parallel 的 drain 线程每收到一条 game 消息即以
+     len(game_records) (单调 1..games) 调用 progress_callback, 并用
+     try/except 包住 —— viz 永远不能崩训练。
+   - 线程安全不变式(已文档化): generate_games 期间主循环线程阻塞在
+     join(), 只有 drain 线程运行, 故回调里 buffer.refresh() 与并发
+     sample() 无竞争, 安全。
+2. loop.py workers>1 分支传入 _on_game_progress: buffer.refresh() +
+   (viz 启动时) push_selfplay_frame(komi, games=buffer.num_games, elo),
+   与 workers==1 逐局路径完全镜像; 批次后原有 refresh 保留(幂等)。
+   中途恢复的 workers>1 兜底分支同样接入。
+3. MUST-NOT 遵守: 未动 config/default.yaml, data/pretrain, ReplayBuffer
+   core(refresh/sample 语义), viz/board_window.py, 未触碰正在跑的 RL 进程。
+
+TESTS (tests/test_selfplay_workers.py, class TestProgressCallback)
+------------------------------------------------------------------
+(a) test_workers2_fires_once_per_game_in_order  — workers=2 games=4:
+    callback 恰被调 4 次, 值 [1,2,3,4] 顺序单调。
+(b) test_workers2_swallows_callback_exceptions  — 回调抛异常,
+    generate_games 仍正常返回 (games==4)。
+(c) test_workers1_ignores_progress_callback     — workers==1 不调回调。
+(d) test_npz_flushed_before_callback_fires      — 每次回调触发时断言
+    磁盘上 npz 数 >= count (消息发送前文件已落盘)。
+
+pytest total: 524 passed, 1 warning (154.57s)  [此前 520 全绿]
