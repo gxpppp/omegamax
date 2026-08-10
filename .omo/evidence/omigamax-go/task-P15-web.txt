@@ -1,0 +1,109 @@
+task-P15: Web 训练监控面板（KataGui 风格）
+==========================================
+Date: 2026-08-10 | HEAD base: ab930d6 | Environment: Windows 10, PowerShell 5.1, uv
+
+目标
+----
+为运行中的 RL 训练循环提供只读的本地 Web 监控面板：训练指标（step/loss/lr/elo/games/cycle + 历史曲线）
+与自对弈棋局回放（npz → 棋盘 + 逐手播放），视觉风格仿 KataGui（木纹棋盘 + 立体棋子）。
+面板为独立进程，只读 logs/train.jsonl 与 data/selfplay/*.npz，绝不触碰训练进程/训练文件。
+
+新增依赖
+--------
+flask>=3.1.3（uv add flask，已入 pyproject.toml；仅 dev/面板依赖，不引入 websocket 库，轮询足够）
+
+新增文件
+--------
+- omigamax/web/__init__.py
+- omigamax/web/dashboard.py        —— Flask 应用 + 数据解析 + API（约 420 行，纯文件读取，无训练循环导入）
+- omigamax/web/static/index.html   —— 面板单页
+- omigamax/web/static/style.css    —— KataGui 深色/木纹风格
+- omigamax/web/static/app.js       —— 原生 JS：轮询/图表/缩略图/回放
+- tests/test_web_dashboard.py      —— 14 个用例
+- .omo/evidence/omigamax-go/task-P15-dashboard.png —— 浏览器实测截图
+
+启动命令（在仓库根目录）
+------------------------
+    uv run python -m omigamax.web.dashboard                 # 默认 http://127.0.0.1:8123
+    uv run python -m omigamax.web.dashboard --port 8124 --debug   # 可选参数
+
+API 规格
+--------
+GET /                 —— 面板首页（static/index.html）
+GET /api/train        —— {latest(step/loss/lr/elo/games/cycle/winrate/replaced),
+                           steps[step,loss,lr,games,cycle,timestamp](全部 train_step),
+                           evals[step,cycle,winrate,replaced,elo,timestamp],
+                           cycles[cycle,step,games,timestamp],
+                           events, file_mtime, alive(最近写入<600s), now}
+GET /api/games        —— {games: 按 mtime 新→旧、cap 50 的 [{id,name,mtime,size,move_count,
+                           winner,result,board_size,komi,forced_terminal}]}
+GET /api/games/<id>   —— {id, board_size, komi, winner, result, move_count, forced_terminal,
+                           positions[每手后 0/1/2 绝对盘面, 末位=终局盘],
+                           moves[{color,r,c,captured} 或 {color,pass,captured}], final}
+所有 API 轻量、可高频轮询；缺失/损坏文件返回空列表或 404，绝不 500。
+
+回放推导方法（已在真实 npz 上验证）
+-----------------------------------
+s 为 17 平面 AGZ 特征：plane 2t=当前方子, 2t+1=对手方子, plane 16=行棋方颜色。
+1) 绝对盘面：对每个记录位置 t，按 plane16 判定行棋方，平面 0 映射为行棋方棋子(1/2)、平面 1 映射为对方棋子，
+   得到 0/1/2 棋盘（loop.py `_reconstruct_board_state` 同布局；本面板独立实现、不导入训练循环）。
+2) 中间手（t<T-1）：第 t 手 = 相邻两盘面间“唯一新增子的交叉点”，无新增子=停一手。
+   —— 与规则引擎 Board 逐盘面 FULL-GRID 全等验证通过（6 局真实棋局，含 459/596 手长棋）。
+3) 最后一手：双停自然终局 → 最后一手=停（记录末位盘面即终局盘，按 stored result 计分精确复现）；
+   max_moves 强制终局 → 末手 = pi[T-1].argmax()（temperature_threshold 后 tau=0，采样即 argmax），
+   按 stored result 计分精确复现（8 局全部 match）。
+结论：平面差分法精确；pi-argmax 不可靠（温度 1 时非 argmax 采样，实测 game_0100 第 97 手不一致），仅用于强制终局末手。
+
+前端功能
+--------
+- 指标卡：step / loss / lr / ELO / games / cycle（最新值实时刷新）
+- Canvas 曲线：loss、elo、lr 三条（无外部图表库；loss 降采样至 ~600 点）
+- 棋局缩略图网格（最新 ~6 局，Canvas 木纹棋盘 + 最终局面 + 胜方/手数/结果）
+- 点击棋局 → 全尺寸棋盘回放：上一手/下一手/首末/自动播放/滑块拖动/键盘(←/→/空格/Esc)
+- 每 2.5s 轮询 /api/train + /api/games，只重渲染变化的棋局，不重置用户已打开的棋局/播放位置
+- 顶部“训练运行中/已停止”状态灯 + 最后更新时刻（liveness=最近写入文件 <600s）
+- favicon 204 兜底；Chrome/Edge 实测无 console 错误
+
+测试
+----
+tests/test_web_dashboard.py（14 用例）：
+  TestTrainAPI.test_parses_train_steps_and_evals
+  TestTrainAPI.test_latest_merges_step_and_eval
+  TestTrainAPI.test_alive_flag_and_timestamp
+  TestTrainAPI.test_missing_log_yields_empty
+  TestTrainAPI.test_corrupt_lines_are_skipped
+  TestGamesAPI.test_lists_games_newest_first
+  TestGamesAPI.test_empty_dir_lists_nothing
+  TestGameReplay.test_reconstructs_exact_moves
+  TestGameReplay.test_replay_api
+  TestGameReplay.test_missing_game_404
+  TestGameReplay.test_path_traversal_blocked
+  TestIndex.test_serves_dashboard_html
+  TestIndex.test_static_assets
+  TestRobustness.test_missing_all_files_ok
+
+uv run pytest -q  →  538 passed（基线 524 + 新增 14）
+
+实时冒烟（对真实运行中的训练，端口 8123）
+------------------------------------------
+uv run python tmp_live_smoke.py（临时脚本，已删）输出摘要：
+== /api/train ==  status: 200 | events: 5897 | alive: True
+  latest: {"cycle":1, "elo":-44.426, "games":100, "loss":3.06638, "lr":0.02, "replaced":false,
+           "step":61000, "timestamp":"2026-08-10T05:05:00", "winrate":0.0}
+  steps_count: 5870 | evals_count: 9 | cycles_count: 11
+== /api/games ==  status: 200 | count: 50
+  game_0000000104  moves=397 winner=B result=B+28.5
+  game_0000000102  moves=726 winner=W result=W+368.5   (…新→旧, 截前 5)
+== /api/games/game_0000000104 == status: 200 | board_size:19 komi:7.5 winner:B result:B+28.5 forced:False
+  moves: 397 | positions: 398
+  first_moves: [B(15,16), W(15,3), B(2,16), W(2,3)]  last_moves: [B(10,11), W pass, B pass]
+  stone_count_trend(first8): [0,1,2,3,4,5,6,7]  单调递增 | final_stones: 353
+== GET / ==  status: 200 | html_bytes: 3375
+浏览器实测：指标卡/曲线/6 局缩略图/回放弹窗（658 手局自动播放至第 107 手）/训练运行中状态灯全部正常；
+轮询 2.5s 自动捕捉到新棋局 game_0000000105；console 无错误。截图见 task-P15-dashboard.png。
+冒烟后已停止服务器并释放 8123 端口（Test-NetConnection 确认）。
+
+约束遵守
+--------
+未触碰训练进程与训练文件（仅读）；未改 config/default.yaml；未动 data/pretrain；端口 8123 选空闲；
+面板仅冒烟启动后即停（非永久服务）。
