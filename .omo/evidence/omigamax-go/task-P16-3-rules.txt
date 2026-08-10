@@ -1,0 +1,86 @@
+omigamax-go P16-3: C++ 规则内核 (bit-exact mirror of omigamax/rules/*)
+====================================================================
+Date: 2026-08-10 | Machine: win32 (Windows 10, PowerShell 5.1) | CPU-only work
+GPU: free (training stopped); no GPU touched by this task
+
+## 1. Files (all under cpp/, pyproject/scikit-build config untouched)
+
+  cpp/board.h             C++17 header: constants (EMPTY=0/BLACK=1/WHITE=2),
+                          IllegalMoveError, class omigamax::Board, free
+                          functions has_liberty / neighbors
+  cpp/board.cpp           Implementation
+  cpp/omigamax_core.cpp   pybind11 bindings (no rules logic; every rule in
+                          board.h/.cpp)
+  cpp/CMakeLists.txt      pybind11_add_module(omigamax_core omigamax_core.cpp
+                          board.cpp) + CXX_STANDARD 17 (pyproject build config
+                          untouched)
+  cpp/omigamax_core.pyi   type stub updated for CppBoard + has_liberty
+
+## 2. Class layout
+
+  omigamax::Board(size)
+    state_   std::vector<int8_t> (flat, index r*size+c)
+    move_count_ / pass_count_ / last_captured_ (flat idx of single-stone
+               capture, -1 none)  <- the ko seam, mirrors board.py history
+    - state()/get/is_on_board/is_empty
+    - group/liberties/liberty_count/has_liberty   (lib/group queries)
+    - is_terminal()            pass_count >= 2
+    - territory()              map<int,int> idx -> owner (0 neutral / 1 / 2),
+                               empty points only (mirrors scoring.territory)
+    - score(komi=7.5)          (double,double) TT area; komi on white
+    - winner(komi)             "B"/"W"/""(None)
+    - result_string(komi)      "B+X[.5]" / "W+..." / "Jigo"
+    - is_legal(r,c,color)      is_legal_move + simple-ko
+    - play(r,c,color,check_legal=true)  returns captured count; throws
+                               IllegalMoveError
+    - pass_move(color)         returns 0
+    - legal_actions(color)     ascending point indices + pass idx size*size
+    - set_stone(r,c,color)     test/construction helper (resets history)
+  Free: omigamax::has_liberty(state, size, r, c)
+
+## 3. Key algorithm notes (each maps 1:1 to the Python reference)
+
+  play/pass  board.py:124-157  -- check_legal first; pass -> pass_count++,
+             last_captured=None; stone -> pass_count=0, place, capture,
+             last_captured = the point iff removed==1 (single-stone group is
+             unambiguous) else None; move_count++.
+  is_legal   legality.py + ko.py:14-28 -- order: on-board, empty, fast-path
+             empty-neighbor (keeps a liberty), else placement simulation on a
+             COPY + has_capturable_group() || has_liberty(); then simple-ko
+             retake check vs last_captured_.
+  capture    captures.py -- for each adjacent opponent group with no liberty
+             (early-exit has_liberty), collect full group (DFS), remove.
+  has_liberty liberties.py:75-99 -- group DFS with early exit at first empty
+             neighbor; empty point -> False.
+  territory  scoring.py:27-61 -- flood-fill empty regions; owner = the single
+             bordering color, else neutral; empty board -> every point None.
+  score      scoring.py:64-84 -- stones + territory + neutral/2, komi on
+             white, same left-to-right float evaluation order.
+  result_string: f"{x:g}" reproduced for the only reachable margins
+             (non-negative integers and half-integers) via fmt_margin().
+  legal_actions mcts.py:227-248 -- row-major point indices then pass
+             index size*size; color None -> derive from move-count parity
+             (black opens, even count).
+
+  No numpy/torch in C++; the binding layer (omigamax_core.cpp) contains no
+  rules logic. C++17 (MSVC 19.44), pybind11 3.1.0.
+
+## 4. Build (uv sync --reinstall-package omigamax, exit 0)
+
+  scikit-build-core 1.0.3, CMake 3.25, MSVC 19.44.35228
+  Built omigamax @ file:///E:/AAAhuancun/betamaster
+  -> editable .venv/Lib/site-packages/omigamax_core.cp312-win_amd64.pyd
+
+## 5. import smoke (exit 0)
+
+  b = omigamax_core.CppBoard(9); b.score(7.5) == (40.5, 48.0);
+  b.winner() == "W"; b.result_string() == "W+7.5";
+  b.legal_actions(1) == [0..80, 81]; omigamax_core.has_liberty(state,9,0,0) False
+
+## 6. Constraints honored
+
+  - omigamax/rules/*.py untouched; pyproject.toml untouched
+  - dependency versions untouched
+  - no build artifacts committed (*.pyd/obj/CMakeCache gitignored)
+  - config/data/models/GPU untouched
+  - tests untouched beyond the new tests/test_cpp_rules_diff.py

@@ -1,0 +1,56 @@
+omigamax-go P16-4: 差分等价测试 C++ CppBoard vs Python Board
+============================================================
+Date: 2026-08-10 | Machine: win32 (Windows 10, PowerShell 5.1) | CPU-only work
+GPU: free (training stopped); no GPU touched by this task
+
+## 1. Test file
+
+  tests/test_cpp_rules_diff.py  (new; only test file touched)
+
+  Random games: seeds 0-999 (1000 games), both sides random legal moves,
+  random pass probability (9x9 p=0.08, 19x19 p=0.05), stepping Python Board
+  and omigamax_core.CppBoard in lockstep. Asserted EXACT equality at EVERY
+  step: flat state, legal_actions (Python tuple vs C++ list, pass index
+  size*size included), capture count, score/winner/result_string (float ==,
+  TT integer arithmetic is exact), plus spot-checked group/liberties/
+  liberty_count/has_liberty (both member and free function) on random points.
+
+  Scripted boundary cases (9 total): empty board, full board,
+  single-eye vs false-eye territory, ko loop repetition (retake illegal ->
+  ko threat resolves -> reciprocal ko), suicide prohibition (play raises on
+  both, board unchanged), double-pass endgame (+ stone clears terminal),
+  komi half-point edge (W+0.5, and komi 7.0 -> Jigo), capture races
+  (one move capturing two separate groups, two-stone capture sets no ko
+  point -> immediate replay legal, snapback single-stone capture), and
+  free-function has_liberty on surrounded/empty/liberated groups.
+
+## 2. Results
+
+  tests/test_cpp_rules_diff.py: 1010 passed in 92.51s (0:01:32)
+    - 800 x 9x9 random games (seeds 0-799)
+    - 200 x 19x19 random games (seeds 800-999)
+    - 10 scripted/boundary tests (incl. legal_actions default-color parity)
+
+  First divergence: NONE. No C++/Python parity divergence was ever observed.
+  Initial failures during development were all in the TEST construction, not
+  the C++ core:
+    * 19x19 seeds that simply did not double-pass within the 400-move cap
+      (parity assertions all passed; removed the "must terminate" test
+      requirement -- termination is the scripted double-pass boundary case)
+    * a wrong expected constant (Python territory() maps ALL empty points to
+      None on an empty board, not {})
+    * a two-group capture shape missing one enclosing black stone
+    * an occupied-point "positive control" and a not-fully-surrounded shape
+  After those test fixes: 1010/1010 green with zero rule divergences.
+
+## 3. Full suite
+
+  uv run pytest -q  ->  1558 passed, 1 warning in 201.72s (0:03:21)
+  (547 baseline + 1010 new diff tests + 1; existing tests untouched/green)
+
+## 4. Regression notes
+
+  - Python is the reference: any divergence is a C++ bug. None found.
+  - Float scoring compared with ==: TT score is integer arithmetic (stones +
+    territory + neutral/2 exact 0.5 increments + komi), so bit-exactness is
+    both required and verified.
