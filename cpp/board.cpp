@@ -432,4 +432,17 @@ void Board::set_stone(int r, int c, int color) {
     move_count_ = 0;
 }
 
+void Board::load_position(const std::vector<std::int8_t>& state,
+                          int move_count, int pass_count,
+                          int last_captured_index) {
+    if (static_cast<int>(state.size()) != size_ * size_) {
+        throw std::invalid_argument(
+            "state length does not match board size");
+    }
+    state_ = state;
+    move_count_ = move_count;
+    pass_count_ = pass_count;
+    last_captured_ = last_captured_index;
+}
+
 }  // namespace omigamax

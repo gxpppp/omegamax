@@ -1,0 +1,101 @@
+TASK P16-5: C++ MCTS 搜索内核（transient-shell 叶子协议）
+=========================================================
+STATUS: SUCCESS
+Date: 2026-08-10
+GPU: untouched (CPU-only task; benchmarks deferred per plan)
+
+DELIVERABLE
+-----------
+C++ AlphaGo-Zero MCTS search engine living entirely in C++ (node pool +
+per-node board copies), exposed via pybind11 as
+`omigamax_core.CppMCTSEngine` + `omigamax_core.cpp_mcts_available()`,
+gated behind `OMIGAMAX_USE_CPP_MCTS=1`. Public API of mcts.py
+(make_root/run_search/sample_action/MCTS/Node signatures & attributes)
+is unchanged; the default path (env unset) is byte-for-byte the current
+Python implementation.
+
+ARCHITECTURE (Oracle-adjudicated pre-commitment, honoured)
+---------------------------------------------------------
+- The C++ tree owns nodes/boards exclusively; NO Python mirror, NO
+  bidirectional sync during the search.
+- When a leaf is submitted to the batched evaluator, a TRANSIENT Python
+  Node shell is built (board snapshot + threaded color + legal_moves +
+  parent chain + full Node attribute set). After the flush the C++
+  engine discards the shell and backprops into its own C++ nodes.
+- Identity matching: the shell submitted IS the object the evaluator
+  returns (submission-order list; each flush verifies `fnode is shell`,
+  mcts.py:536-541 protocol). One bug found & fixed during bring-up: the
+  shell cache used `!is_none()` to test for a built shell, but a
+  default-constructed (null) py::object reports `is_none() == False` --
+  unbuilt slots were mistaken for cached shells and a null object was
+  submitted. Fixed to `ptr() != nullptr`.
+
+INTEGRATION POINT
+-----------------
+omigamax/mcts/mcts.py run_search, after AGZ Dirichlet-root-noise handling
+(RNG stays entirely Python -- apply_dirichlet_noise consumes the rng once
+per root call identically; C++ consumes NO rng) and batched-evaluator
+detection:
+
+    if _use_cpp_mcts() and batched:
+        _run_cpp_search(root, evaluator, ...)   # C++MCTSEngine(...).run(); .export_root()
+        return root
+
+Routing requires a batched evaluator (submit/flush). Per-leaf evaluators
+and the plain-network path (NetworkEvaluator) keep the original Python
+loop byte-for-byte. `cpp_mcts_available()` probes the extension;
+`_use_cpp_mcts()` reads the env var at call time (tests can toggle per
+case via monkeypatch).
+
+C++ ENGINE (cpp/mcts_engine.h/.cpp)
+-----------------------------------
+- Node pool: int indices, parent/children{action,node} ascending/prior/
+  visit_count/value_sum(double)/virtual_loss/noisy(via root map)/color/
+  legal_moves(lazy). Boards in a separate pool (deep copy per child).
+- UCB selection: double, SAME operation order as Python select_child
+  `q + c_puct * prior * sqrt(N_parent) / (1 + N_eff)`, tie-break LOWEST
+  action index (children iterated ascending; strictly-greater compare).
+  std::sqrt == math.sqrt (correctly rounded SSE2) => bit-exact.
+- Expand: deep-copy board per legal child, play(pass/point,
+  check_legal=false) -- mirrors mcts.py:328-352; child color = 3 - parent.
+- Backprop: negate value at every level, value_sum += v in double.
+- Search loop mirrors run_search's batched path exactly (terminal leaves
+  never evaluated; re-selecting a pending leaf flushes; virtual-loss
+  claim/release in try/finally; tail batch flushed).
+- import(): rebuilds the C++ tree from the caller's Python root (board
+  state/pass_count/last_captured/moves-count, threaded color, stats,
+  existing subtree). export(): materializes the C++ tree back onto the
+  root (stats + children dict, ascending insertion order).
+- Root noise: Dirichlet is applied by Python BEFORE routing; C++ receives
+  the {action: noisy} map and uses it only at the root. Root children are
+  exposed in ascending action order so a Python-side eta vector maps
+  bit-identically.
+
+NOT IN C++ (per spec)
+---------------------
+Network inference, rng consumption, decode_policy (numpy), sampling.
+
+GATE 1 (bit-exact subset; tests/test_cpp_mcts_diff.py)
+------------------------------------------------------
+20 fixed seeds (0-19), sims=30, 9x9 b1c4 CPU model:
+- move-for-move identity: 20/20 games identical (0 divergences)
+- pi arrays bit-exact (np.array_equal), winner/result identical
+- direct run_search tree comparison (seeds 0,1,2): every root child's
+  visit_count / value_sum / prior EXACTLY equal (bit-exact)
+=> 23/23 tests passed in 81.8s. No float divergence to fix -- the
+   "if divergence, RECORD and FIX" clause did not trigger.
+
+PRIOR WORK REUSED
+-----------------
+- T1 toolchain / T2 scikit-build-core build chain (cpp/ CMakeLists.txt +
+  pybind11 module). Build: `uv pip install -e .` (editable scikit-build).
+- T3+T4 C++ Board (board.h/board.cpp) already differential-tested
+  bit-exact vs omigamax.rules; new `Board::load_position()` import helper.
+
+FILES
+-----
+cpp/mcts_engine.h, cpp/mcts_engine.cpp, cpp/omigamax_core.cpp (bindings),
+cpp/omigamax_core.pyi, cpp/CMakeLists.txt (+mcts_engine.cpp),
+cpp/board.h/.cpp (+load_position), omigamax/mcts/mcts.py (+probe/route),
+omigamax/mcts/__init__.py (+cpp_mcts_available export),
+tests/test_cpp_mcts_diff.py.

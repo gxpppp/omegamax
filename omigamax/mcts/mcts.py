@@ -88,6 +88,7 @@ Structure of the module:
 from __future__ import annotations
 
 import math
+import os
 from typing import Callable
 
 import numpy as np
@@ -112,6 +113,92 @@ DEFAULT_KOMI = 7.5
 # Type of a leaf evaluator: (node) -> (prior_probs (N**2+1,), value float).
 # Todo 11 extends this contract to a batched evaluator.
 Evaluator = Callable[["Node"], tuple[np.ndarray, float]]
+
+
+# ---------------------------------------------------------------------------
+# C++ MCTS engine probe (env-gated; see tests/test_cpp_mcts_diff.py)
+# ---------------------------------------------------------------------------
+
+def _cpp_core():
+    """The compiled ``omigamax_core`` extension, or ``None`` when absent."""
+    try:
+        import omigamax_core  # local import: extension may not be built
+        return omigamax_core
+    except Exception:
+        return None
+
+
+def cpp_mcts_available() -> bool:
+    """True when the compiled C++ MCTS search engine is importable."""
+    core = _cpp_core()
+    if core is None:
+        return False
+    probe = getattr(core, "cpp_mcts_available", None)
+    return bool(probe()) if probe is not None else False
+
+
+def _use_cpp_mcts() -> bool:
+    """Routing decision: ``OMIGAMAX_USE_CPP_MCTS=1`` AND the engine is built.
+
+    Read at call time so tests can toggle it per-case (``monkeypatch``); the
+    default path (env unset) is byte-for-byte the current Python loop.
+    """
+    return os.environ.get("OMIGAMAX_USE_CPP_MCTS", "0") == "1" and cpp_mcts_available()
+
+
+def _cpp_make_node(board_state, size, moves, pass_count, last_captured, color,
+                   legal_moves, prior, parent, visit_count, value_sum):
+    """Build a transient Python :class:`Node` shell from raw C++ node data.
+
+    Transient-shell protocol: the C++ engine owns the tree; when a leaf is
+    submitted to the batched evaluator this helper materialises the position
+    snapshot (board), the threaded mover (``color``), the precomputed legal
+    mask and a parent chain (for the AGZ history reconstruction) -- the exact
+    attribute set ``BatchedNetworkEvaluator`` reads. After the flush the C++
+    engine discards the shell and backprops into its own nodes; the same
+    helper materialises the final tree back onto the caller's root.
+    """
+    b = Board(size)
+    b._state = board_state
+    b.moves = moves
+    b.pass_count = pass_count
+    b.last_captured_point = last_captured
+    node = Node(
+        board=b,
+        prior=prior,
+        legal_moves=tuple(legal_moves) if legal_moves is not None else None,
+        parent=parent,
+        color=color,
+    )
+    node.visit_count = int(visit_count)
+    node.value_sum = float(value_sum)
+    return node
+
+
+def _run_cpp_search(root, evaluator, simulations, c_puct, komi, virtual_loss,
+                    batch_size) -> None:
+    """Route a batched search through the C++ engine (env-gated).
+
+    The C++ engine imports ``root`` (existing subtree + stats), runs the
+    search with the transient-shell protocol, then materialises the result
+    back onto ``root``. RNG stays entirely in Python (``apply_dirichlet_noise``
+    already consumed it once per root call before we get here); decoding and
+    sampling stay Python.
+    """
+    core = _cpp_core()
+    engine = core.CppMCTSEngine(
+        root,
+        evaluator,
+        int(simulations),
+        float(c_puct),
+        float(komi),
+        int(virtual_loss),
+        int(batch_size),
+        _cpp_make_node,
+        root.noisy_prior,
+    )
+    engine.run()
+    engine.export_root()
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +598,16 @@ def run_search(
         apply_dirichlet_noise(root, alpha, eps, rng=dirichlet_rng)
     else:
         root.noisy_prior = None  # never let stale noise leak into a fresh run
+
+    # -- C++ search engine (env-gated, batched evaluator only) ------------
+    # The engine mirrors the loop below bit-exactly (same UCB op order, same
+    # expand/backup semantics) while owning the tree in C++; leaves reach the
+    # evaluator through the transient-shell protocol. The Python loop below is
+    # the default path, byte-for-byte unchanged.
+    if _use_cpp_mcts() and batched:
+        _run_cpp_search(root, evaluator, int(simulations), float(c_puct),
+                        float(komi), int(virtual_loss), int(batch_size))
+        return root
 
     # Pending (in-flight) batch: (leaf, path from root to leaf). The batch is
     # flushed whenever it reaches batch_size, on re-selecting an already

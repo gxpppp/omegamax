@@ -8,6 +8,40 @@ def has_liberty(state: list[int], size: int, r: int, c: int) -> bool:
     """True if the group at (r, c) in a flat state has at least one liberty."""
 
 
+def cpp_mcts_available() -> bool:
+    """True when the C++ MCTS search engine is compiled into this module."""
+
+
+class CppMCTSEngine:
+    """C++ AlphaGo-Zero MCTS search engine (transient-shell leaf protocol).
+
+    The tree lives in C++; Python :class:`~omigamax.mcts.mcts.Node` shells are
+    built transiently for the batched evaluator and the final tree is exported
+    onto the caller's root by ``export_root``. Bit-exact mirror of
+    :func:`omigamax.mcts.run_search` on the batched-evaluator path.
+    """
+
+    def __init__(
+        self,
+        py_root: object,
+        evaluator: object,
+        simulations: int,
+        c_puct: float,
+        komi: float,
+        virtual_loss: int,
+        batch_size: int,
+        make_node: object,
+        noisy_prior: dict[int, float] | None,
+    ) -> None:
+        """Import ``py_root`` (existing subtree + stats) for a new search."""
+
+    def run(self) -> None:
+        """Run the search loop (Python run_search semantics, batched path)."""
+
+    def export_root(self) -> None:
+        """Materialize the C++ tree back onto the caller's Python root."""
+
+
 class CppBoard:
     def __init__(self, size: int) -> None:
         """Board with the given parameterized size (e.g. 9, 19)."""

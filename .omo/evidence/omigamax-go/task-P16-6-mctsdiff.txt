@@ -1,0 +1,62 @@
+TASK P16-6: 差分等价测试（C++ MCTS 内核 vs Python 参考）
+========================================================
+STATUS: SUCCESS (both gates PASS)
+Date: 2026-08-10
+GPU: untouched (CPU-only; tiny 9x9 b1c4 model)
+
+GATE 1 — BIT-EXACT SUBSET (100% move-for-move identity required)
+----------------------------------------------------------------
+20 fixed seeds (0-19), sims=30, 9x9 CPU model, both engines on the same
+seed rng + same deterministic network:
+- identical move sequences : 20/20 games (0 divergences)
+- pi arrays               : bit-exact (np.array_equal on float32)
+- features (s) arrays     : bit-exact
+- winner / result         : identical
+- direct search-tree compare (seeds 0-2): every root child visit_count /
+  value_sum / prior exactly equal (bit-exact doubles)
+- result: 23/23 tests passed in 81.8s.
+The "if ~1 move differs -> RECORD seed+divergence and FIX" clause never
+triggered: IEEE double + same op order (q + c_puct*prior*sqrt(Np)/(1+Neff))
++ std::sqrt==math.sqrt gave 100% identity. No gate was relaxed.
+
+GATE 2 — STATISTICAL (200 games, sims 20-50)
+--------------------------------------------
+200 games, seeds 0-199, sims = 20 + seed % 31 (range 20..50),
+9x9 b1c4 CPU model, max_moves=100 cap:
+  total_moves       = 14026
+  agreed_moves      = 14026
+  move-agreement    = 100.0000 %   (gate >= 95 % : PASS)
+  winner-agreement  = 100.000 %    (report-only, not a gate)
+  diverging games   = 0
+  first-divergence distribution = none (no game ever diverged)
+  legality          = 100 % (every C++-path game replayed against the
+                             omigamax rules engine; no IllegalMoveError)
+  termination       = 100 % (all games end by double-pass or max_moves;
+                             forced_terminal flag and board.is_terminal
+                             both checked)
+  runtime           = 897.0 s (~15 min; the plan's 200-game budget)
+
+Because Gate 1 proved bit-exactness and the network is deterministic, the
+statistical gate measured 100% agreement -- the C++ engine and the Python
+reference produce identical games over the full 200-game sample.
+
+RUNS
+----
+uv run pytest tests/test_cpp_mcts_diff.py -k gate1 -q   -> 23 passed (81.8s)
+uv run pytest tests/test_cpp_mcts_diff.py -k gate2 -q -s -> 1 passed (897.0s)
+   [gate2] games=200 total_moves=14026 agreed=14026 rate=1.0000
+           winner_rate=1.000 divergences=n=0 none
+uv run pytest tests/test_mcts.py -q                     -> 40 passed (4.4s)
+   (default Python path byte-for-byte unchanged by the env-gated routing)
+
+FINAL SUITE TOTALS (both paths)
+-------------------------------
+uv run pytest -q                                          -> 1583 passed,
+   (C++ path OFF by default; the diff test toggles the env internally)  1132.95s
+OMIGAMAX_USE_CPP_MCTS=1 uv run pytest tests/test_mcts.py
+                                 tests/test_selfplay.py -q -> 62 passed (4.6s)
+omigamax.mcts.cpp_mcts_available()                          -> True
+
+MUST-NOT discipline respected: real b20c256 model NOT used; the Python
+engine was NOT modified to force agreement; the bit-exact gate was NOT
+relaxed to "acceptable difference".

@@ -93,6 +93,11 @@ public:
     // Directly place a stone, resetting move history (pass_count_ /
     // last_captured_ / move_count_). Test/construction helper only.
     void set_stone(int r, int c, int color);
+    // Load a full position (flat state + history counters). Import helper
+    // for the C++ MCTS engine (mirrors setting Board._state / moves /
+    // pass_count / last_captured_point from Python).
+    void load_position(const std::vector<std::int8_t>& state, int move_count,
+                       int pass_count, int last_captured_index);
 
 private:
     int idx(int r, int c) const { return r * size_ + c; }

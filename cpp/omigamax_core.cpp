@@ -1,7 +1,8 @@
 // pybind11 bindings for the omigamax C++ rules core.
 //
 // No rules logic lives here — every rule is in board.h / board.cpp; this
-// layer only translates Python calls onto the C++ Board API.
+// layer only translates Python calls onto the C++ Board API. The C++ MCTS
+// search engine (mcts_engine.cpp) is exposed as CppMCTSEngine.
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "board.h"
+#include "mcts_engine.h"
 
 namespace py = pybind11;
 
@@ -154,4 +156,26 @@ PYBIND11_MODULE(omigamax_core, m) {
              py::arg("c"), py::arg("color"),
              "Directly place a stone, resetting move history "
              "(test/construction helper).");
+
+    // -- C++ MCTS search engine (transient-shell leaf protocol) -----------
+    m.def("cpp_mcts_available", []() { return true; },
+          "True when the C++ MCTS search engine is compiled into this module.");
+
+    py::class_<omigamax::CppMCTSEngine>(
+        m, "CppMCTSEngine",
+        "C++ AlphaGo-Zero MCTS search engine (transient-shell leaf protocol). "
+        "The tree lives here; Python Node shells are built transiently for "
+        "the batched evaluator and the final tree is exported onto the "
+        "caller's root by export_root().")
+        .def(py::init<py::object, py::object, int, double, double, int, int,
+                      py::object, py::object>(),
+             py::arg("py_root"), py::arg("evaluator"), py::arg("simulations"),
+             py::arg("c_puct"), py::arg("komi"), py::arg("virtual_loss"),
+             py::arg("batch_size"), py::arg("make_node"),
+             py::arg("noisy_prior"))
+        .def("run", &omigamax::CppMCTSEngine::run,
+             "Run the search loop (Python run_search semantics, batched "
+             "evaluator path).")
+        .def("export_root", &omigamax::CppMCTSEngine::export_root,
+             "Materialize the C++ tree back onto the caller's Python root.");
 }
