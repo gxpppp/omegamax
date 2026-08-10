@@ -1,0 +1,54 @@
+P16-7: --save-every-games 对局中途存档 + resume 续生成
+========================================================
+状态: COMPLETE (verified + fixed)
+
+设计 (omigamax/train/loop.py)
+-----------------------------
+- DEFAULT_SAVE_EVERY_GAMES=10; run_loop(save_every_games=None) 经
+  _resolve_run_param 解析 (CLI > checkpoint cfg > default)。
+- cycle_base = games_generated@cycle-start; games_this_cycle 计数当前 cycle
+  已完成对局 (resume 时从 checkpoint extra 恢复, 缺键->0)。
+- _save_ckpt (全部位于 _save_lock 内):
+  * cycle_complete -> games_this_cycle=0, games_generated=真实计数;
+  * mid-cycle 且 games_this_cycle<games_per_cycle -> games_generated=cycle_base
+    快照 (resume 绝不重算已完成对局);
+  * mid-cycle 且 games_this_cycle==games_per_cycle (self-play done) ->
+    games_generated=cycle_base+games_this_cycle (修复: workers>1 drain 线程
+    最后一局存档先于主线程 games_generated+=games_per_cycle, 此前会误存
+    cycle_base)。
+- workers>1: _on_game_progress (drain 线程) 每局 +1, 逢 N 存档;
+  workers==1: 每局循环 +1 逢 N 存档; generate 只产 remaining_games,
+  seed=seed+cycle_base+games_this_cycle; 结束 games_generated=cycle_base+games_per_cycle。
+- _eval_now 调 _save_ckpt: 中途 eval 不清 games_this_cycle, cycle 末 eval 清。
+- argparse --save-every-games (default None, 0=禁用), 已存在未新增。
+
+测试 (tests/test_loop_save_every_games.py, 9 用例, 全部 9x9 CPU 假件临时目录)
+----------------------------------------------------------------------------
+(a) workers=1 与 workers=2: 中途每 N 存档, games_this_cycle 递增,
+    extra games_generated==cycle_base (0); self-play 恰好落在 N 倍数时
+    存真实计数。
+(b) workers=1 与 workers=2: kill 中途 -> --resume -> 仅生成剩余局,
+    seed 从 cycle_base+games_this_cycle 续起, 每 cycle 去重 seed 总数
+    == games_per_cycle (两路径); 训练继续, steps_trained/global_step 接续。
+(c) cycle 完成 -> games_this_cycle 0 (含 _eval_now 存档); 中途 eval-gate
+    存档不清除。
+(d) 并发: drain 线程存档与模拟 Ctrl+C 存档竞争, latest.pt 始终可 load
+    (重试 + 稳定后再读)。
+(e) --save-every-games 0 -> 无任何中途存档。
+(f) 无 games_this_cycle 键的旧 checkpoint -> resume 正常, 全量重生成,
+    save_every_games 回退默认 10。
+
+修复 (本轮)
+-----------
+1. loop.py _save_ckpt: self-play done 分支由 persist games_generated 改为
+   cycle_base+games_this_cycle (修复 workers=2 drain 最后局存档计数错误)。
+2. test fake_gen: workers==1 时 kill_after 局数需先 COMPLETE 再触发中断
+   (此前第 N 次调用先入列再抛, 只算成 N-1 局)。
+3. test seed 断言: workers>1 单次 batch 调用按 (seed, seed+games) 重构
+   每局 seed 集, 两路径统一验证续点+去重。
+
+结果
+----
+uv run pytest tests/test_loop_save_every_games.py -q      -> 9 passed
+uv run pytest -q (全量, CPU, 无 GPU)                     -> 547 passed, 1 warning
+   (基线 538 + 新增 9)

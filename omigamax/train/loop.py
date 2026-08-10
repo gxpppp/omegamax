@@ -70,6 +70,7 @@ import argparse
 import json
 import logging
 import signal
+import threading
 import time
 from pathlib import Path
 
@@ -115,6 +116,12 @@ DEFAULT_HISTORY = "logs/eval_history.jsonl"
 DEFAULT_EVIDENCE = ".omo/evidence/omigamax-go/task-16-loop.json"
 DEFAULT_EVAL_MAX_MOVES = 1000
 DEFAULT_PRETRAIN_DATA_DIR = Path("data") / "pretrain"
+
+# P16-7: mid-selfplay checkpoint cadence. A checkpoint is written every N
+# completed games inside a cycle (0 disables mid-cycle saves), persisting the
+# cycle-base snapshot + games_this_cycle so a resume continues generating only
+# the remaining games instead of redoing the completed ones.
+DEFAULT_SAVE_EVERY_GAMES = 10
 
 # --smoke low-config preset (plan: sims=40, batch=32, ~100-games scale; the
 # acceptance demo runs a smaller slice so one full cycle + gate completes in
@@ -506,6 +513,9 @@ def _model_from_checkpoint(
         "games_generated": int(extra.get("games_generated", 0)),
         "steps_into_cycle": int(extra.get("steps_into_cycle", 0)),
         "cycles_completed": int(extra.get("cycles_completed", 0)),
+        # P16-7: completed games in the current cycle (missing on old
+        # checkpoints -> 0, i.e. a fresh cycle / full regeneration).
+        "games_this_cycle": int(extra.get("games_this_cycle", 0)),
         "resumed": resumed,
         "init_checkpoint": (
             None if init_checkpoint is None else str(init_checkpoint)
@@ -567,6 +577,7 @@ def _load_or_init(
         "model": model, "optimizer": optimizer, "rng": rng,
         "global_step": 0, "games_generated": 0,
         "steps_into_cycle": 0, "cycles_completed": 0, "resumed": False,
+        "games_this_cycle": 0,
         "init_checkpoint": None,
         "ckpt_config": {},
     }
@@ -651,6 +662,7 @@ def run_loop(
     leaf_batch: "int | None" = None,
     selfplay_fp16: bool = False,
     selfplay_workers: "int | None" = None,
+    save_every_games: "int | None" = None,
 ) -> dict:
     """Run the self-play -> train -> eval-gate loop (interruptible, resumable).
 
@@ -676,6 +688,18 @@ def run_loop(
     a *copy* of ``cfg`` which ``_save_ckpt`` persists, so every new
     checkpoint auto-restores them; old checkpoints without the keys fall back
     to the safe defaults and still need explicit flags on resume.
+
+    ``save_every_games`` (P16-7, default 10; 0 disables) is another run-only
+    param, resolved the same way and persisted the same way. When > 0, a
+    mid-selfplay checkpoint is written every N completed games of a cycle
+    (from the workers>1 drain thread, or from the workers==1 per-game loop).
+    Such a checkpoint records ``games_generated`` as the CYCLE BASE snapshot
+    plus a new ``games_this_cycle`` counter, so a later ``--resume`` with
+    ``games_this_cycle > 0`` and ``steps_into_cycle == 0`` continues by
+    generating only ``games_per_cycle - games_this_cycle`` games (seeds from
+    ``seed + games_generated + games_this_cycle``) -- completed games are
+    never regenerated. ``games_this_cycle`` is cleared ONLY when the cycle
+    completes; mid-cycle eval-gate saves never clear it.
 
     Returns a report dict (also used as the todo-16 evidence JSON).
     """
@@ -769,17 +793,24 @@ def run_loop(
             f"(6GB GPU cap), got {selfplay_workers}")
     pretrain_data_dir, pd_src = _resolve_run_param(
         "pretrain_data_dir", pretrain_data_dir, DEFAULT_PRETRAIN_DATA_DIR)
+    save_every_games, seg_src = _resolve_run_param(
+        "save_every_games", save_every_games, DEFAULT_SAVE_EVERY_GAMES)
+    save_every_games = int(save_every_games)
+    if save_every_games < 0:
+        raise ValueError(f"save_every_games must be >= 0, got {save_every_games}")
     for _name, _val in (
         ("human_mix", human_mix),
         ("selfplay_workers", selfplay_workers),
         ("pretrain_data_dir", str(pretrain_data_dir)),
+        ("save_every_games", save_every_games),
     ):
         persist_cfg[_name] = _val
     logger.info(
         "run config: human_mix=%s (source=%s) selfplay_workers=%s "
-        "(source=%s) pretrain_data_dir=%s (source=%s)",
+        "(source=%s) pretrain_data_dir=%s (source=%s) "
+        "save_every_games=%s (source=%s)",
         human_mix, hm_src, selfplay_workers, sw_src,
-        pretrain_data_dir, pd_src)
+        pretrain_data_dir, pd_src, save_every_games, seg_src)
 
     # P7: the board size follows the *model* (checkpoint arch wins over the
     # config) so self-play / buffer / viz / the eval gate all use the net's
@@ -843,6 +874,20 @@ def run_loop(
     last_eval_step = -1
     remaining_budget = None if steps_budget is None else int(steps_budget)
 
+    # P16-7: save-every-games mid-selfplay checkpoint snapshots.
+    # ``cycle_base`` is the value of ``games_generated`` when the CURRENT
+    # cycle's self-play started; mid-cycle saves persist ``games_generated``
+    # as this snapshot (never the advanced in-memory counter) so a resume
+    # cannot double-count the in-flight cycle's games. ``games_this_cycle``
+    # counts completed games in the current cycle (restored from the
+    # checkpoint extra on resume) and is cleared ONLY when the cycle
+    # completes. ``_save_lock`` serializes the workers>1 drain-thread save
+    # against a Ctrl+C interrupt save so two concurrent writers can never
+    # corrupt ``latest.pt.tmp``.
+    cycle_base = int(games_generated)
+    games_this_cycle = int(st.get("games_this_cycle", 0))
+    _save_lock = threading.Lock()
+
     def _save_ckpt() -> str:
         # A checkpoint at a completed cycle persists steps_into_cycle=0 so a
         # later resume starts a fresh cycle; a mid-cycle checkpoint persists
@@ -857,15 +902,37 @@ def run_loop(
             int(cycles_completed) + int(cycles_done)
             + (1 if cycle_complete else 0)
         )
-        return save_checkpoint(
-            latest, model, optimizer, global_step=int(global_step),
-            config=persist_cfg, rng=rng,
-            extra={
-                "games_generated": int(games_generated),
-                "steps_into_cycle": persist_into,
-                "cycles_completed": persist_cycles,
-            },
+        # P16-7 games state. ``games_this_cycle`` is reset to 0 ONLY when the
+        # cycle is complete (mid-cycle eval-gate saves never clear it). While
+        # the cycle's self-play is still in flight (games_this_cycle below
+        # games_per_cycle) ``games_generated`` is persisted as the CYCLE BASE
+        # snapshot; once the cycle's games are all generated (self-play done,
+        # training in flight) the true counter is persisted, preserving the
+        # pre-P16-7 mid-cycle checkpoint contract (test_loop.py asserts it).
+        persist_games_this_cycle = (
+            0 if cycle_complete else int(games_this_cycle)
         )
+        if cycle_complete:
+            persist_games = int(games_generated)
+        elif int(games_this_cycle) < int(games_per_cycle):
+            persist_games = int(cycle_base)
+        else:
+            # self-play done (games_this_cycle == games_per_cycle): persist the
+            # TRUE counter. The workers>1 drain-thread save for the final game
+            # can land before the main thread advances ``games_generated`` by
+            # games_per_cycle, so compute it from the cycle base instead.
+            persist_games = int(cycle_base) + int(games_this_cycle)
+        with _save_lock:
+            return save_checkpoint(
+                latest, model, optimizer, global_step=int(global_step),
+                config=persist_cfg, rng=rng,
+                extra={
+                    "games_generated": persist_games,
+                    "steps_into_cycle": persist_into,
+                    "cycles_completed": persist_cycles,
+                    "games_this_cycle": persist_games_this_cycle,
+                },
+            )
 
     def _eval_now() -> dict:
         nonlocal current_elo, last_eval_step
@@ -930,6 +997,14 @@ def run_loop(
         (refresh + push_selfplay_frame) so the window advances per finished
         game instead of staying frozen until the whole batch lands.
 
+        P16-7: this is also the workers>1 mid-selfplay save hook -- the
+        completed-game count in the current cycle advances here and a
+        checkpoint is written every ``save_every_games`` games (the same
+        cadence the workers==1 per-game loop uses). The drain thread is the
+        ONLY thread executing while ``generate_games`` runs (the main thread
+        is blocked in ``join()``), and ``_save_ckpt`` takes ``_save_lock`` so
+        a Ctrl+C interrupt save in the main thread can never race the file.
+
         Thread-safety invariant: while ``generate_games`` runs, the main loop
         thread is blocked in ``join()`` and only the drain thread executes, so
         ``buffer.refresh()`` here never races a concurrent ``sample()``. The
@@ -938,6 +1013,10 @@ def run_loop(
         swallowed callback failure cannot leave the window permanently stale.
         ``_count`` is informational -- the frame shows ``buffer.num_games``.
         """
+        nonlocal games_this_cycle
+        games_this_cycle += 1
+        if save_every_games > 0 and games_this_cycle % save_every_games == 0:
+            _save_ckpt()
         buffer.refresh()
         if viz.get("started"):
             push_selfplay_frame(
@@ -960,50 +1039,45 @@ def run_loop(
                 # call passes seed=int(seed)+games_generated and increments
                 # games_generated, so the npz set / buffer contents are
                 # identical to one generate_games(games=N) batch call.
+                #
+                # P16-7: ``cycle_base`` snapshots games_generated at cycle
+                # start; ``games_this_cycle`` (restored on resume) counts games
+                # completed in the current cycle. When a mid-selfplay
+                # checkpoint was saved (games_this_cycle > 0) we generate only
+                # the REMAINING games, seeded from cycle_base + games_this_cycle
+                # -- completed games are never regenerated. After the block the
+                # full cycle's total is restored so the counter advances by a
+                # whole cycle regardless of how many games were resumed.
+                cycle_base = int(games_generated)
+                remaining_games = int(games_per_cycle) - int(games_this_cycle)
+                seed_offset = int(games_generated) + int(games_this_cycle)
                 rep = {"games": 0, "sims": 0, "wall_time_s": 0.0,
                        "sims_per_sec": 0.0}
-                if selfplay_workers > 1:
-                    # P12: multi-process batch. N worker processes generate the
-                    # whole cycle's games in parallel -- each worker holds its
-                    # own model copy + evaluator + MCTS, so the serial MCTS
-                    # selection phases run on separate CPU cores while GPU
-                    # forwards from different workers overlap (raise avg GPU
-                    # util and sims/s on the idle-phase-bound loop). Seeds stay
-                    # continuous (seed + games_generated .. +games_per_cycle-1)
-                    # so the npz set is identical to the single-process batch.
-                    # Viz limitation: per-move frames are NOT streamed from
-                    # worker processes (each worker has its own private board);
-                    # instead generate_games fires _on_game_progress once per
-                    # completed worker game (buffer-refresh + push_selfplay_
-                    # frame), so the window advances per finished game, plus
-                    # one more buffer-refresh frame after the batch lands.
-                    r, _records = generate_games(
-                        model, cfg, games=games_per_cycle, data_dir=data_dir,
-                        keep=keep_games, seed=int(seed) + games_generated,
-                        simulations=simulations, max_moves=selfplay_max_moves,
-                        size=board_size, leaf_batch=leaf_batch,
-                        fp16=selfplay_fp16, workers=selfplay_workers,
-                        progress_callback=_on_game_progress)
-                    games_generated += games_per_cycle
-                    buffer.refresh()
-                    if viz.get("started"):
-                        push_selfplay_frame(
-                            viz, buffer, board_size,
-                            komi=float(cfg.get("komi", 7.5)),
-                            games=buffer.num_games, train_step=None,
-                            elo=current_elo)
-                    rep["games"] += int(r.get("games", 1))
-                    rep["sims"] += int(r.get("sims", 0))
-                    rep["wall_time_s"] += float(r.get("wall_time_s", 0.0))
-                else:
-                    for _ in range(games_per_cycle):
+                if remaining_games > 0:
+                    if selfplay_workers > 1:
+                        # P12: multi-process batch. N worker processes generate
+                        # the whole cycle's games in parallel -- each worker
+                        # holds its own model copy + evaluator + MCTS, so the
+                        # serial MCTS selection phases run on separate CPU cores
+                        # while GPU forwards from different workers overlap
+                        # (raise avg GPU util and sims/s on the idle-phase-bound
+                        # loop). Seeds stay continuous (seed + seed_offset ..
+                        # +games_per_cycle-1) so the npz set is identical to
+                        # the single-process batch. Viz limitation: per-move
+                        # frames are NOT streamed from worker processes (each
+                        # worker has its own private board); instead
+                        # generate_games fires _on_game_progress once per
+                        # completed worker game (buffer-refresh +
+                        # push_selfplay_frame + the P16-7 every-N save), so the
+                        # window advances per finished game, plus one more
+                        # buffer-refresh frame after the batch lands.
                         r, _records = generate_games(
-                            model, cfg, games=1, data_dir=data_dir,
-                            keep=keep_games, seed=int(seed) + games_generated,
+                            model, cfg, games=remaining_games, data_dir=data_dir,
+                            keep=keep_games, seed=int(seed) + seed_offset,
                             simulations=simulations, max_moves=selfplay_max_moves,
-                            size=board_size, frame_callback=_per_move_frame,
-                            leaf_batch=leaf_batch, fp16=selfplay_fp16)
-                        games_generated += 1
+                            size=board_size, leaf_batch=leaf_batch,
+                            fp16=selfplay_fp16, workers=selfplay_workers,
+                            progress_callback=_on_game_progress)
                         buffer.refresh()
                         if viz.get("started"):
                             push_selfplay_frame(
@@ -1014,6 +1088,45 @@ def run_loop(
                         rep["games"] += int(r.get("games", 1))
                         rep["sims"] += int(r.get("sims", 0))
                         rep["wall_time_s"] += float(r.get("wall_time_s", 0.0))
+                    else:
+                        for i in range(remaining_games):
+                            r, _records = generate_games(
+                                model, cfg, games=1, data_dir=data_dir,
+                                keep=keep_games,
+                                seed=int(seed) + seed_offset + i,
+                                simulations=simulations,
+                                max_moves=selfplay_max_moves,
+                                size=board_size,
+                                frame_callback=_per_move_frame,
+                                leaf_batch=leaf_batch, fp16=selfplay_fp16)
+                            games_generated += 1
+                            games_this_cycle += 1
+                            buffer.refresh()
+                            if viz.get("started"):
+                                push_selfplay_frame(
+                                    viz, buffer, board_size,
+                                    komi=float(cfg.get("komi", 7.5)),
+                                    games=buffer.num_games, train_step=None,
+                                    elo=current_elo)
+                            rep["games"] += int(r.get("games", 1))
+                            rep["sims"] += int(r.get("sims", 0))
+                            rep["wall_time_s"] += float(
+                                r.get("wall_time_s", 0.0))
+                            # P16-7 workers==1 hook: write a mid-selfplay
+                            # checkpoint every N completed games of the cycle
+                            # (progress_callback is ignored for workers==1, so
+                            # the per-game loop owns the cadence here).
+                            if save_every_games > 0 and \
+                                    games_this_cycle % save_every_games == 0:
+                                _save_ckpt()
+                else:
+                    # resume right after a completed self-play phase: the
+                    # cycle's games are already on disk, just refresh.
+                    buffer.refresh()
+                # the whole cycle's games are now accounted for (whether fresh,
+                # continued, or already on disk): advance by the FULL cycle so
+                # games_generated never falls behind / double counts on resume.
+                games_generated = int(cycle_base) + int(games_per_cycle)
                 rep["sims_per_sec"] = (
                     rep["sims"] / rep["wall_time_s"]
                     if rep["wall_time_s"] > 0 else 0.0)
@@ -1035,6 +1148,9 @@ def run_loop(
                     # Regenerate deterministically (same model, same seeds).
                     # With workers>1 the whole cycle batch goes out at once
                     # (same seed continuity as the start-of-cycle path).
+                    # P16-7: games_this_cycle tracks the regenerated games
+                    # (the _on_game_progress drain hook / the per-game loop
+                    # counter below) so mid-regeneration saves stay consistent.
                     if selfplay_workers > 1:
                         generate_games(
                             model, cfg, games=games_per_cycle, data_dir=data_dir,
@@ -1055,6 +1171,10 @@ def run_loop(
                                 size=board_size, frame_callback=_per_move_frame,
                                 leaf_batch=leaf_batch, fp16=selfplay_fp16)
                             games_generated += 1
+                            games_this_cycle += 1
+                            if save_every_games > 0 and \
+                                    games_this_cycle % save_every_games == 0:
+                                _save_ckpt()
                     buffer.refresh()
                     if viz.get("started"):
                         push_selfplay_frame(
@@ -1127,6 +1247,12 @@ def run_loop(
             if steps_into_cycle >= steps_per_cycle:
                 steps_into_cycle = 0
                 cycles_done += 1
+                # P16-7: cycle complete -> the cycle's games are fully
+                # accounted for; clear the per-cycle counter and advance the
+                # base so a subsequent save (incl. the final one) persists the
+                # true totals instead of a stale mid-cycle snapshot.
+                games_this_cycle = 0
+                cycle_base = int(games_generated)
             if remaining_budget is not None:
                 remaining_budget -= n_train
     except KeyboardInterrupt:
@@ -1136,6 +1262,8 @@ def run_loop(
         if steps_into_cycle >= steps_per_cycle:
             steps_into_cycle = 0
             cycles_done += 1
+            games_this_cycle = 0
+            cycle_base = int(games_generated)
         _save_ckpt()
         _log_loop_event(train_log, "interrupt", step=global_step,
                         total_steps=total_steps, cycles_completed=cycles_done,
@@ -1149,6 +1277,8 @@ def run_loop(
         if steps_into_cycle >= steps_per_cycle:
             steps_into_cycle = 0
             cycles_done += 1
+            games_this_cycle = 0
+            cycle_base = int(games_generated)
         _log_loop_event(train_log, "loop_end", step=global_step,
                         total_steps=total_steps, cycles_completed=cycles_done,
                         games_generated=games_generated,
@@ -1203,6 +1333,7 @@ def run_loop(
                 else int(cfg.get("leaf_batch", 16))),
             "selfplay_fp16": bool(selfplay_fp16),
             "selfplay_workers": int(selfplay_workers),
+            "save_every_games": int(save_every_games),
             "grad_clip": grad_clip,
             "seed": int(seed),
             "resume": bool(resume),
@@ -1354,6 +1485,15 @@ def _build_parser() -> argparse.ArgumentParser:
                              "serial search phases and GPU forwards overlap "
                              "-- per-move live viz is disabled; capped at 3 "
                              "on the 6GB GPU, ~1.4GB fp16 per worker)")
+    parser.add_argument("--save-every-games", type=int, default=None,
+                        help="write a mid-selfplay checkpoint every N "
+                             "completed games of a cycle (default 10; 0 "
+                             "disables). The checkpoint records the cycle "
+                             "base + games_this_cycle so a later --resume "
+                             "continues generating only the remaining games "
+                             "instead of redoing the completed ones. "
+                             "Resolved on --resume: CLI arg > checkpoint "
+                             "config > default.")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (default 0)")
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
@@ -1444,6 +1584,7 @@ def main(argv: "list[str] | None" = None) -> int:
             leaf_batch=args.leaf_batch,
             selfplay_fp16=args.selfplay_fp16,
             selfplay_workers=args.selfplay_workers,
+            save_every_games=args.save_every_games,
         )
     except KeyboardInterrupt:
         # Interrupt landed outside run_loop's protected region (model load,
