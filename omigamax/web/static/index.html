@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>omigamax · 训练监控</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <h1>omigamax <em>训练监控</em></h1>
+  </div>
+  <div class="status">
+    <span id="live-dot" class="live-dot off" title="训练进程状态"></span>
+    <span id="live-text">连接中…</span>
+    <span id="last-update" class="muted"></span>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- LEFT: metrics panel -->
+  <section class="panel metrics-panel">
+    <h2 class="panel-title">训练指标</h2>
+    <div class="metric-grid">
+      <div class="metric-card"><div class="metric-label">步数 step</div><div class="metric-value" id="m-step">—</div></div>
+      <div class="metric-card"><div class="metric-label">损失 loss</div><div class="metric-value" id="m-loss">—</div></div>
+      <div class="metric-card"><div class="metric-label">学习率 lr</div><div class="metric-value" id="m-lr">—</div></div>
+      <div class="metric-card"><div class="metric-label">ELO</div><div class="metric-value" id="m-elo">—</div></div>
+      <div class="metric-card"><div class="metric-label">对局数 games</div><div class="metric-value" id="m-games">—</div></div>
+      <div class="metric-card"><div class="metric-label">周期 cycle</div><div class="metric-value" id="m-cycle">—</div></div>
+    </div>
+
+    <h3 class="chart-title">Loss 曲线</h3>
+    <canvas id="chart-loss" class="chart" width="380" height="110"></canvas>
+    <h3 class="chart-title">ELO 曲线</h3>
+    <canvas id="chart-elo" class="chart" width="380" height="110"></canvas>
+    <h3 class="chart-title">学习率</h3>
+    <canvas id="chart-lr" class="chart" width="380" height="90"></canvas>
+
+    <div class="log-meta" id="log-meta"></div>
+  </section>
+
+  <!-- MAIN: recent games grid -->
+  <section class="panel games-panel">
+    <div class="games-header">
+      <h2 class="panel-title">最近自对弈棋局 <span id="game-count" class="muted"></span></h2>
+      <div class="refresh-hint muted">每 2.5s 自动刷新 · 点击棋局进入回放</div>
+    </div>
+    <div id="games-grid" class="games-grid"></div>
+    <div id="games-empty" class="empty-hint hidden">暂无棋局数据</div>
+  </section>
+</main>
+
+<!-- REPLAY MODAL -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="modal-title">棋局回放</h2>
+      <div id="modal-meta" class="muted"></div>
+      <button id="modal-close" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="board-wrap">
+        <canvas id="replay-board" width="560" height="560"></canvas>
+        <div class="replay-status" id="replay-status"></div>
+      </div>
+      <div class="replay-controls">
+        <button id="btn-first" class="ctl" title="第一手">⏮</button>
+        <button id="btn-prev" class="ctl" title="上一手">◀</button>
+        <button id="btn-play" class="ctl primary" title="自动播放">▶</button>
+        <button id="btn-next" class="ctl" title="下一手">▶|</button>
+        <button id="btn-last" class="ctl" title="最后一手">⏭</button>
+        <span class="move-counter" id="move-counter">0 / 0</span>
+        <input type="range" id="move-slider" class="slider" min="0" max="0" value="0">
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
