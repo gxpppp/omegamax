@@ -1,0 +1,26 @@
+P16-8 evidence: --save-every-games 真实 loop 中途杀进程 resume 集成冒烟
+scenario: 9x9 b1c8 CPU, workers=2, --save-every-games 5, 2 cycles x 10 games, --seed 0; hard-kill process tree after ~7th game of cycle 1, then --resume.
+
+== leg 1 (killed mid-selfplay) ==
+pre-kill npz seeds (7 games): [0, 1, 2, 3, 4, 5, 6]
+killed checkpoint extra: games_this_cycle=5 games_generated=0 (cycle base) steps_into_cycle=0 cycles_completed=0
+latest.pt loadable right after the hard kill: yes (atomic tmp+os.replace)
+
+== leg 2 (--resume, exit 0) ==
+final npz seed set (20 games): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+cycle 1 seeds == range(10): True
+cycle 2 seeds == range(10, 20): True
+no gaps / no duplicates: True
+resumed session generated per cycle (cycle_start games): [5, 10]  -> cycle 1 continued from seed base+5 = {base+5..base+9}, cycle 2 full batch
+train steps (contiguous, no restart): [1, 2, 3, 4, 5, 6]
+resume report: resumed=True interrupted=False steps_trained=6 global_step_final=6 games_generated=20 cycles_done=2 eval_gates=2 save_every_games=5 selfplay_workers=2
+final checkpoint extra: games_this_cycle=0 games_generated=20 cycles_completed=2
+latest.pt poll-loads during resumed run: 530 ok / 0 failures
+
+verdict: PASS -- resume continues from the game-5 checkpoint (seeds {5..9}), training continues (steps 1..6), final checkpoint games_this_cycle=0, latest.pt loadable after every save.
+
+pytest totals:
+  uv run pytest tests/test_loop_save_every_games.py tests/test_loop_save_every_e2e.py -q
+    -> 10 passed in 23.77s (9 todo-7 + 1 new E2E)
+  uv run pytest -q (FULL)
+    -> 548 passed in 144.75s (547 previous + 1 new)
