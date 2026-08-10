@@ -1,0 +1,51 @@
+task-P13: 运行参数持久化到 checkpoint (human_mix / selfplay_workers / pretrain_data_dir)
+=============================================================================
+HEAD: 5705efa | date: 2026-08-10 | RL loop NOT running (machine restarted)
+
+问题
+----
+run_loop 把 human_mix / selfplay_workers / pretrain_data_dir 作为纯函数参数接收
+(CLI --human-mix 0.25 等), 而 _save_ckpt 持久化的 config=cfg 是原始配置 dict
+(不包含这些运行期参数)。机器重启后 `--resume` 静默回到纯 RL (human_mix 丢失);
+models/latest.pt (global_step 61000) 无 mix 记录。
+
+设计
+----
+1. 签名: human_mix / pretrain_data_dir / selfplay_workers 默认值改为 None,
+   "None" 语义 = 从 checkpoint/cfg 解析。
+2. 解析优先级 (per-param): 显式 CLI 实参 > 恢复的 checkpoint 记录 config
+   (仅 resume 路径, _model_from_checkpoint 新增返回 ckpt_config) > 传入 cfg >
+   安全默认 (human_mix=0.0, workers=1)。
+3. 解析后的值写回 persist_cfg = dict(cfg) (副本, 绝不改动调用方 dict),
+   _save_ckpt 改为持久化 persist_cfg -> 新 checkpoint 自动携带运行参数,
+   旧 checkpoint 无 key 时回落到默认值 (仍须显式传参, 符合预期)。
+4. 循环启动时打印解析日志, 静默退化不可能被忽略:
+   run config: human_mix=%s (source=%s) selfplay_workers=%s (source=%s)
+   pretrain_data_dir=%s (source=%s)   # source in {cli, checkpoint, default}
+5. CLI parser 默认值 0.0/str(dir)/1 改为 None (未传 flag 时交给 run_loop 解析),
+   帮助文本注明 "auto -- restored from the checkpoint on --resume"。
+   未修改 save_checkpoint/load_checkpoint 核心格式 (沿用现有 config/extra 字段),
+   未改 config/default.yaml, 未触碰 data/pretrain。
+
+测试 (新增 tests/test_loop_persist.py, 全部 CPU 9x9 b1c8, fake selfplay/train)
+-----------------------------------------------------------------------------
+(a) test_checkpoint_persists_run_params: human_mix=0.25 + workers=2 运行后,
+    latest.pt 的 config 含 human_mix==0.25 / selfplay_workers==2 /
+    pretrain_data_dir==corpus; 且调用方 cfg 未被改动 (persist_cfg 为副本)。
+(b) test_resume_restores_run_params: 不带任何 flag 的 --resume 从 checkpoint
+    解析出 0.25 / 2 / corpus (经返回 report["protocol"] 断言)。
+(c) test_explicit_flags_override_checkpoint: resume 时显式 human_mix=0.5 /
+    workers=1 覆盖 checkpoint 值。
+(d) test_old_checkpoint_resolves_safe_defaults: 手工写入不含 key 的旧式
+    checkpoint, resume 无崩溃, 解析为 human_mix=0.0 / selfplay_workers=1。
+另更新 tests/test_selfplay_workers.py::test_loop_parser_exposes_selfplay_workers:
+    parser 空参数默认 selfplay_workers 断言 1 -> None (P13 语义)。
+
+测试结果
+--------
+$ uv run pytest -q
+520 passed, 1 warning in 114.37s   # 516 既有 + 4 新增, 全绿
+
+复现日志行示例 (新 checkpoint 自动恢复)
+    run config: human_mix=0.25 (source=checkpoint) selfplay_workers=2
+    (source=checkpoint) pretrain_data_dir=... (source=checkpoint)
