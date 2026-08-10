@@ -434,8 +434,13 @@ def _worker_main(state_dict, arch, cfg, data_dir, device, base_seed,
     want live viz use the buffer-refresh frame path (loop.py
     :func:`push_selfplay_frame`) after the batch lands instead.
 
-    Results (``records`` + per-worker ``stats``) come back through ``out_q``,
-    one ``dict`` per worker.
+    Results come back through ``out_q`` as ONE message per completed game
+    (``{"type": "game", "record": rec}``, sent ONLY after that game's npz is
+    flushed to disk) followed by one closing per-worker ``{"type": "stats",
+    "stats": {...}}`` message (P14). The parent drain thread consumes the game
+    messages and fires ``progress_callback`` per completed game -- keeping
+    per-game messages (instead of one batched dict) is what lets viz refresh
+    once per finished game instead of only after the whole batch lands.
     """
     device = torch.device(device)
     network = create_model(
@@ -452,11 +457,15 @@ def _worker_main(state_dict, arch, cfg, data_dir, device, base_seed,
         rec["npz"] = save_game_npz(
             rec, Path(data_dir) / f"game_{rec['seed']:010d}.npz")
         records.append(rec)
+        # P14: notify the parent per game, AFTER save_game_npz (os.replace
+        # made the file visible at its final name), so a drain-side callback
+        # can safely assert the npz is already on disk.
+        out_q.put({"type": "game", "record": rec})
         sims += int(rec["sims"])
         positions += int(rec["move_count"])
     wall = time.perf_counter() - t0
     out_q.put({
-        "records": records,
+        "type": "stats",
         "stats": {
             "worker_index": int(worker_index),
             "games": len(records),
@@ -469,7 +478,8 @@ def _worker_main(state_dict, arch, cfg, data_dir, device, base_seed,
 
 
 def _generate_games_parallel(network, cfg, games, data_dir, seed, workers,
-                             play_kwargs) -> tuple[list[dict], float, list[dict]]:
+                             play_kwargs,
+                             progress_callback=None) -> tuple[list[dict], float, list[dict]]:
     """Spawn ``workers`` processes; each generates its strided game slice.
 
     Returns ``(records, wall_time_s, worker_stats)``.
@@ -485,6 +495,17 @@ def _generate_games_parallel(network, cfg, games, data_dir, seed, workers,
     otherwise fill the pipe buffer and deadlock the join (each worker blocks in
     ``put`` until the reader consumes). The thread keeps the pipe drained; a
     crashed worker is detected via its non-zero ``exitcode`` after ``join``.
+
+    ``progress_callback`` (optional, P14): invoked as
+    ``progress_callback(completed_games)`` from the drain thread each time one
+    worker game message arrives -- monotone ``1..games``, and the game's npz
+    was already flushed to disk before its message (see :func:`_worker_main`).
+    Invocation is try/except-wrapped: a failing callback can never break
+    generation. Thread-safety invariant: while the parent is inside this
+    function the main loop thread is blocked in ``join()`` and only the drain
+    thread runs, so a callback that refreshes the replay buffer / pushes a viz
+    frame is safe there (no concurrent ``sample()``). ``None`` (default) keeps
+    behavior identical to P12.
     """
     ctx = multiprocessing.get_context("spawn")  # Windows-safe, picklable args
     state_dict = {k: v.detach().cpu() for k, v in network.state_dict().items()}
@@ -506,11 +527,28 @@ def _generate_games_parallel(network, cfg, games, data_dir, seed, workers,
     # Drain results concurrently with the join so a full pipe can never
     # deadlock the parent (see docstring). The thread is daemonic so a worker
     # that crashed without putting cannot block this process's exit.
-    results: list = []
+    game_records: list[dict] = []
+    stats: list[dict] = []
 
     def _drain() -> None:
-        for _ in procs:
-            results.append(out_q.get())
+        # One "game" message per completed game, then one "stats" per worker.
+        stats_seen = 0
+        while stats_seen < workers:
+            msg = out_q.get()
+            if msg["type"] == "game":
+                game_records.append(msg["record"])
+                # P14: fire per-game progress from the drain thread -- the main
+                # loop thread is blocked in join() and never touches the buffer
+                # here, so a viz refresh in the callback is safe. Never raise:
+                # viz must never crash training.
+                if progress_callback is not None:
+                    try:
+                        progress_callback(len(game_records))
+                    except Exception:  # noqa: BLE001 - viz must never break training
+                        pass
+            else:  # "stats"
+                stats.append(msg["stats"])
+                stats_seen += 1
 
     threading.Thread(target=_drain, daemon=True, name="sp-worker-drain").start()
     for p in procs:
@@ -523,21 +561,19 @@ def _generate_games_parallel(network, cfg, games, data_dir, seed, workers,
             f"self-play worker process(es) exited with error: {failed} "
             "(see the worker traceback above; common causes: CUDA OOM, "
             "unpicklable **play_kwargs).")
-    # all workers exited 0 -> each put exactly one item; wait briefly for the
-    # daemon drain thread to finish copying them into ``results``.
+    # all workers exited 0 -> each put its game messages + one closing stats
+    # message; wait briefly for the daemon drain thread to finish copying them.
     deadline = time.perf_counter() + 10.0
-    while len(results) < workers and time.perf_counter() < deadline:
+    while (len(stats) < workers or len(game_records) < games) \
+            and time.perf_counter() < deadline:
         time.sleep(0.05)
-    if len(results) != workers:
+    if len(stats) != workers or len(game_records) != games:
         raise RuntimeError(
-            f"expected {workers} worker result(s), collected {len(results)}")
+            f"expected {workers} worker result(s) and {games} games, "
+            f"collected {len(stats)} worker(s) / {len(game_records)} games")
 
-    records = []
-    for item in results:
-        records.extend(item["records"])
-    records.sort(key=lambda r: int(r["seed"]))
-    worker_stats = [item["stats"] for item in results]
-    worker_stats.sort(key=lambda s: int(s["worker_index"]))
+    records = sorted(game_records, key=lambda r: int(r["seed"]))
+    worker_stats = sorted(stats, key=lambda s: int(s["worker_index"]))
     return records, wall, worker_stats
 
 
@@ -550,6 +586,7 @@ def generate_games(
     seed: int = 0,
     frame_callback=None,
     workers: int = 1,
+    progress_callback=None,
     **play_kwargs,
 ) -> tuple[dict, list[dict]]:
     """Generate ``games`` self-play games, save one npz per game, prune.
@@ -583,6 +620,15 @@ def generate_games(
       refresh viz path for workers>1.
     * ``report["wall_time_s"]`` is the batch wall clock including spawn/reload;
       ``report["per_worker"]`` holds per-worker generation-only timings.
+
+    ``progress_callback`` (optional, P14): with ``workers>1`` it is invoked as
+    ``progress_callback(completed_games)`` from the parent's drain thread each
+    time a worker game lands on disk -- a monotone ``1..games`` count, and the
+    game's npz is already flushed before the notification (see
+    :func:`_generate_games_parallel`). Callback exceptions are swallowed: viz
+    must never crash training. ``workers==1`` IGNORES ``progress_callback``
+    (the caller's own per-game loop already exists there). Never forwarded
+    into worker processes.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -619,7 +665,8 @@ def generate_games(
         }]
     else:
         records, wall, worker_stats = _generate_games_parallel(
-            network, cfg, games, data_dir, int(seed), workers, play_kwargs)
+            network, cfg, games, data_dir, int(seed), workers, play_kwargs,
+            progress_callback=progress_callback)
 
     pruned = prune_old_games(data_dir, keep)
     total_sims = sum(r["sims"] for r in records)

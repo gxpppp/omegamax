@@ -921,6 +921,30 @@ def run_loop(
         if snap is not None:
             push_viz_frame(viz, snap)
 
+    def _on_game_progress(_count: int) -> None:
+        """P14: one buffer-refresh frame per completed game for workers>1.
+
+        Passed as ``progress_callback`` to the batched ``generate_games`` call
+        (workers>1), which invokes it from its drain thread each time a worker
+        game's npz lands on disk -- mirroring the workers==1 per-game path
+        (refresh + push_selfplay_frame) so the window advances per finished
+        game instead of staying frozen until the whole batch lands.
+
+        Thread-safety invariant: while ``generate_games`` runs, the main loop
+        thread is blocked in ``join()`` and only the drain thread executes, so
+        ``buffer.refresh()`` here never races a concurrent ``sample()``. The
+        whole callback is try/except-wrapped inside ``generate_games``; the
+        batched call's own post-batch refresh below is kept (idempotent), so a
+        swallowed callback failure cannot leave the window permanently stale.
+        ``_count`` is informational -- the frame shows ``buffer.num_games``.
+        """
+        buffer.refresh()
+        if viz.get("started"):
+            push_selfplay_frame(
+                viz, buffer, board_size,
+                komi=float(cfg.get("komi", 7.5)),
+                games=buffer.num_games, train_step=None, elo=current_elo)
+
     try:
         while cycles_done < cycles and (
             remaining_budget is None or remaining_budget > 0
@@ -949,14 +973,17 @@ def run_loop(
                     # so the npz set is identical to the single-process batch.
                     # Viz limitation: per-move frames are NOT streamed from
                     # worker processes (each worker has its own private board);
-                    # the window instead gets one buffer-refresh frame after
-                    # the batch lands (push_selfplay_frame below).
+                    # instead generate_games fires _on_game_progress once per
+                    # completed worker game (buffer-refresh + push_selfplay_
+                    # frame), so the window advances per finished game, plus
+                    # one more buffer-refresh frame after the batch lands.
                     r, _records = generate_games(
                         model, cfg, games=games_per_cycle, data_dir=data_dir,
                         keep=keep_games, seed=int(seed) + games_generated,
                         simulations=simulations, max_moves=selfplay_max_moves,
                         size=board_size, leaf_batch=leaf_batch,
-                        fp16=selfplay_fp16, workers=selfplay_workers)
+                        fp16=selfplay_fp16, workers=selfplay_workers,
+                        progress_callback=_on_game_progress)
                     games_generated += games_per_cycle
                     buffer.refresh()
                     if viz.get("started"):
@@ -1015,7 +1042,8 @@ def run_loop(
                             simulations=simulations,
                             max_moves=selfplay_max_moves,
                             size=board_size, leaf_batch=leaf_batch,
-                            fp16=selfplay_fp16, workers=selfplay_workers)
+                            fp16=selfplay_fp16, workers=selfplay_workers,
+                            progress_callback=_on_game_progress)
                         games_generated += games_per_cycle
                     else:
                         for _ in range(games_per_cycle):

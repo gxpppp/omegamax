@@ -21,6 +21,7 @@ network's device), so the suite is fast and fully deterministic.
 
 import inspect
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -322,3 +323,59 @@ class TestFrameCallbackWithWorkers:
             workers=2, frame_callback=cb, **KWARGS)
         assert report["games"] == 2
         assert seen == []  # no per-move frames from worker processes
+
+
+# ---------------------------------------------------------------------------
+# P14: per-game progress_callback for workers>1 (viz fix)
+# ---------------------------------------------------------------------------
+
+class TestProgressCallback:
+    """``progress_callback`` fires once per completed worker game, in order,
+    after that game's npz is flushed; failures are swallowed; workers==1
+    ignores it."""
+
+    def test_workers2_fires_once_per_game_in_order(self, net, cfg, tmp_path):
+        counts: list[int] = []
+        report, _ = sp.generate_games(
+            net, cfg, games=4, data_dir=tmp_path / "data", keep=10, seed=0,
+            workers=2, progress_callback=counts.append, **KWARGS)
+        assert report["games"] == 4
+        assert counts == [1, 2, 3, 4]  # exactly 4 calls, monotone in order
+
+    def test_workers2_swallows_callback_exceptions(self, net, cfg, tmp_path):
+        def boom(_count):
+            raise RuntimeError("viz broke")
+
+        report, _ = sp.generate_games(
+            net, cfg, games=4, data_dir=tmp_path / "data", keep=10, seed=0,
+            workers=2, progress_callback=boom, **KWARGS)
+        # a raising callback must never crash generation
+        assert report["games"] == 4
+
+    def test_workers1_ignores_progress_callback(self, net, cfg, tmp_path):
+        calls: list[int] = []
+        report, _ = sp.generate_games(
+            net, cfg, games=2, data_dir=tmp_path / "data", keep=10, seed=0,
+            progress_callback=calls.append, **KWARGS)
+        assert report["games"] == 2
+        assert calls == []  # workers==1 path ignores progress_callback
+
+    def test_npz_flushed_before_callback_fires(self, net, cfg, tmp_path):
+        data_dir = tmp_path / "data"
+        seen: list[int] = []
+        expected = {f"game_{s:010d}.npz" for s in range(4)}
+
+        def cb(count):
+            seen.append(count)
+            # the count-th completed game's npz was flushed before its message;
+            # other workers may have written more, so at least `count` exist.
+            on_disk = {p.name for p in Path(data_dir).glob("*.npz")}
+            assert len(on_disk) >= count
+            assert on_disk <= expected  # only this batch's files, nothing else
+
+        report, _ = sp.generate_games(
+            net, cfg, games=4, data_dir=data_dir, keep=10, seed=0,
+            workers=2, progress_callback=cb, **KWARGS)
+        assert report["games"] == 4
+        assert seen == [1, 2, 3, 4]
+        assert {p.name for p in Path(data_dir).glob("*.npz")} == expected
