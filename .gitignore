@@ -49,3 +49,11 @@ gtp_logs/
 
 # Checkpoint binaries under evidence (26MB per model; keep the small JSON/txt/png evidence)
 *.pt
+
+# Native build artifacts (scikit-build-core / CMake / MSVC)
+*.pyd
+*.obj
+*.exp
+*.lib
+CMakeCache.txt
+CMakeFiles/

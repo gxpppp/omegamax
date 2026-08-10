@@ -1,0 +1,79 @@
+omigamax-go P16-2: 构建链切换 scikit-build-core + pybind11 + CMake + Ninja
+=========================================================================
+Date: 2026-08-10 | Machine: win32 (Windows 10, PowerShell 5.1) | CPU-only work
+GPU: free (training stopped); no GPU touched by this task
+
+## 1. build-system before / after
+
+BEFORE:
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+(tool.uv.build-backend: module-name="omigamax", module-root="")
+-> uv_build 是纯 Python 后端，不支持 C 扩展，必须整体替换。
+
+AFTER (pyproject.toml [build-system]):
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13", "cmake>=3.15", "ninja"]
+build-backend = "scikit_build_core.build"
+
+AFTER ([tool.scikit-build] 新增，最小配置):
+cmake.source-dir = "cpp"
+wheel.packages = ["omigamax", "cpp/omigamax_core.pyi"]
+说明: 安装的 scikit-build-core 为 1.0.3，0.x 的 wheel.py-modules 键已移除；
+1.x 用 wheel.packages（可指向单个 .py 模块文件拷至 wheel 根）。
+wheel.packages 显式列出后需同时声明纯 Python 包 omigamax，否则自动发现被禁用。
+
+新增文件:
+  cpp/CMakeLists.txt      (cmake_minimum_required 3.15...3.27; find_package(pybind11 CONFIG REQUIRED); pybind11_add_module)
+  cpp/omigamax_core.cpp   (PYBIND11_MODULE(omigamax_core, m){ m.doc()="omigamax C++ core"; })
+  cpp/omigamax_core.pyi   (类型 stub，wheel.py-modules 等价声明)
+.gitignore 追加: *.pyd *.obj *.exp *.lib CMakeCache.txt CMakeFiles/
+
+依赖版本: [project] dependencies 原样未动（flask/numpy/pygame/pytest/pyyaml/torch==2.13.0+cu130），
+仅 build-system.requires 增加 4 个构建依赖。
+
+## 2. uv sync 结果 (exit 0)
+
+uv 0.12.2 | Python 3.12.10 | scikit-build-core 1.0.3
+  Resolved 44 packages in 0.85ms
+  Building omigamax @ file:///E:/AAAhuancun/betamaster
+  Built omigamax @ file:///E:/AAAhuancun/betamaster
+  Installed 1 package: omigamax==0.1.0 (from file:///E:/AAAhuancun/betamaster)
+UV_SYNC_EXIT_CODE=0
+-> editable 安装，编译产物 .venv/Lib/site-packages/omigamax_core.cp312-win_amd64.pyd (137216 B)
+
+补充: uv build（真实 wheel 构建，verbose 日志证明显式编译链）
+  *** scikit-build-core 1.0.3 using CMake 3.25.0 (wheel)
+  -- Building for: Visual Studio 17 2022
+  -- The CXX compiler identification is MSVC 19.44.35228.0
+  -- Found Python 3.12.10 (Interpreter Development.Module)
+  -- Found pybind11 3.1.0
+  ClCompile: MSVC 14.44.35207\HostX64\x64\CL.exe /c /O2 /GL ... cpp\omigamax_core.cpp
+  Link:     link.exe /OUT:omigamax_core.cp312-win_amd64.pyd ... python312.lib
+  *** Created omigamax-0.1.0-cp312-cp312-win_amd64.whl
+  Successfully built dist\omigamax-0.1.0.tar.gz
+  Successfully built dist\omigamax-0.1.0-cp312-cp312-win_amd64.whl
+BUILD_EXIT=0
+(注意: cmake/ninja 在 build-system.requires 中属冗余但无害，scikit-build-core
+仅发 WARNING 并自行注入；按要求保留这 4 个构建依赖声明)
+
+## 3. import 冒烟 (uv run python -c "...")
+
+$ uv run python -c "import omigamax_core; print(omigamax_core.__name__); print(omigamax_core.__doc__)"
+omigamax_core
+omigamax C++ core
+IMPORT_EXIT=0
+
+## 4. pytest 全量 (uv run pytest -q)
+
+538 passed, 1 warning in 100.34s (0:01:40)
+PYTEST_EXIT=0
+-> 538 全部通过，构建链切换未破坏任何既有测试。
+
+## 约束核对
+- 未改动 [project] dependencies 版本（仅新增 4 个构建依赖）
+- 未提交任何构建产物（.pyd/.obj/.lib/CMakeCache 均已 gitignore，dist/ 已忽略）
+- 未改动 config/default.yaml、data/、models/
+- 未触碰 GPU（纯 CPU 构建）
+- 未修改任何 Python 源码（仅 pyproject.toml + .gitignore + 新增 cpp/）
+  * omigamax/train/loop.py 的工作区改动来自并发任务 P16-7，不在本次提交范围
