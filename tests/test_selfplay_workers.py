@@ -108,7 +108,9 @@ class TestDefaultsAndPlumbing:
         args = parser.parse_args(["--selfplay-workers", "2"])
         assert args.selfplay_workers == 2
         args = parser.parse_args([])
-        assert args.selfplay_workers == 1
+        # P13: no flag -> None so run_loop restores the value from the
+        # checkpoint on --resume (falls back to 1 otherwise).
+        assert args.selfplay_workers is None
 
     def test_run_loop_batches_with_workers(self, tmp_path, monkeypatch):
         """workers>1: run_loop sends ONE batched generate_games(workers=N)

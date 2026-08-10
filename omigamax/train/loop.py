@@ -510,6 +510,9 @@ def _model_from_checkpoint(
         "init_checkpoint": (
             None if init_checkpoint is None else str(init_checkpoint)
         ),
+        # P13: the persisted config snapshot of the loaded checkpoint -- the
+        # source for run-param restore on resume (human_mix / workers / ...).
+        "ckpt_config": ckpt.get("config") or {},
     }
 
 
@@ -565,6 +568,7 @@ def _load_or_init(
         "global_step": 0, "games_generated": 0,
         "steps_into_cycle": 0, "cycles_completed": 0, "resumed": False,
         "init_checkpoint": None,
+        "ckpt_config": {},
     }
 
 
@@ -642,11 +646,11 @@ def run_loop(
     viz_enabled: "bool | None" = None,
     logger=None,
     interrupt_after: "int | None" = None,
-    human_mix: float = 0.0,
-    pretrain_data_dir: "str | Path" = DEFAULT_PRETRAIN_DATA_DIR,
+    human_mix: "float | None" = None,
+    pretrain_data_dir: "str | Path | None" = None,
     leaf_batch: "int | None" = None,
     selfplay_fp16: bool = False,
-    selfplay_workers: int = 1,
+    selfplay_workers: "int | None" = None,
 ) -> dict:
     """Run the self-play -> train -> eval-gate loop (interruptible, resumable).
 
@@ -662,6 +666,16 @@ def run_loop(
     checkpoint (e.g. ``models/pretrain.pt``): its recorded arch wins over the
     config and the pretrained weights become the starting point (P7 RL
     fine-tuning at b20c256; ignored when ``resume`` finds ``latest.pt``).
+
+    ``human_mix`` / ``selfplay_workers`` / ``pretrain_data_dir`` are run-only
+    params (NOT in ``config/default.yaml``) that shape training-data
+    composition. ``None`` means "resolve": an explicit arg wins, else the
+    resumed checkpoint's recorded config (P13: a bare ``--resume`` after a
+    machine restart restores them automatically), else ``cfg``, else the safe
+    default (human_mix 0.0, workers 1). The resolved values are written into
+    a *copy* of ``cfg`` which ``_save_ckpt`` persists, so every new
+    checkpoint auto-restores them; old checkpoints without the keys fall back
+    to the safe defaults and still need explicit flags on resume.
 
     Returns a report dict (also used as the todo-16 evidence JSON).
     """
@@ -685,11 +699,6 @@ def run_loop(
               else None))
     batch_size = int(batch_size if batch_size is not None
                      else cfg.get("batch_size", 128))
-    selfplay_workers = int(selfplay_workers)
-    if selfplay_workers < 1 or selfplay_workers > MAX_SELFPLAY_WORKERS:
-        raise ValueError(
-            f"selfplay_workers must be 1..{MAX_SELFPLAY_WORKERS} "
-            f"(6GB GPU cap), got {selfplay_workers}")
     eval_games = int(eval_games if eval_games is not None
                      else cfg.get("eval_games", DEFAULT_EVAL_GAMES))
     eval_sims = int(eval_sims if eval_sims is not None
@@ -726,6 +735,51 @@ def run_loop(
     steps_into_cycle = int(st["steps_into_cycle"])
     cycles_completed = int(st["cycles_completed"])
     resumed = bool(st["resumed"])
+
+    # P13: human_mix / selfplay_workers / pretrain_data_dir are run-only
+    # params (absent from config/default.yaml) that shape training-data
+    # composition. They are persisted into the checkpoint's config so a bare
+    # ``--resume`` after a machine restart restores them automatically instead
+    # of silently reverting to pure-RL. Resolution order: an explicit CLI arg
+    # wins; else the resumed checkpoint's recorded config; else ``cfg``; else
+    # the safe default. Old checkpoints (no keys) therefore fall back to
+    # human_mix=0.0 / workers=1 and still need explicit flags on resume. The
+    # resolved values are written into ``persist_cfg`` -- a COPY of the
+    # caller's cfg -- which is what ``_save_ckpt`` persists (the caller's dict
+    # is never mutated).
+    persist_cfg = dict(cfg)
+    ckpt_cfg = dict(st.get("ckpt_config") or {}) if resumed else {}
+
+    def _resolve_run_param(name, explicit, default):
+        """explicit arg > resumed-checkpoint config > cfg > safe default."""
+        if explicit is not None:
+            return explicit, "cli"
+        if name in ckpt_cfg and ckpt_cfg.get(name) is not None:
+            return ckpt_cfg[name], "checkpoint"
+        return cfg.get(name, default), "default"
+
+    human_mix, hm_src = _resolve_run_param("human_mix", human_mix, 0.0)
+    human_mix = float(human_mix)
+    selfplay_workers, sw_src = _resolve_run_param(
+        "selfplay_workers", selfplay_workers, 1)
+    selfplay_workers = int(selfplay_workers)
+    if selfplay_workers < 1 or selfplay_workers > MAX_SELFPLAY_WORKERS:
+        raise ValueError(
+            f"selfplay_workers must be 1..{MAX_SELFPLAY_WORKERS} "
+            f"(6GB GPU cap), got {selfplay_workers}")
+    pretrain_data_dir, pd_src = _resolve_run_param(
+        "pretrain_data_dir", pretrain_data_dir, DEFAULT_PRETRAIN_DATA_DIR)
+    for _name, _val in (
+        ("human_mix", human_mix),
+        ("selfplay_workers", selfplay_workers),
+        ("pretrain_data_dir", str(pretrain_data_dir)),
+    ):
+        persist_cfg[_name] = _val
+    logger.info(
+        "run config: human_mix=%s (source=%s) selfplay_workers=%s "
+        "(source=%s) pretrain_data_dir=%s (source=%s)",
+        human_mix, hm_src, selfplay_workers, sw_src,
+        pretrain_data_dir, pd_src)
 
     # P7: the board size follows the *model* (checkpoint arch wins over the
     # config) so self-play / buffer / viz / the eval gate all use the net's
@@ -805,7 +859,7 @@ def run_loop(
         )
         return save_checkpoint(
             latest, model, optimizer, global_step=int(global_step),
-            config=cfg, rng=rng,
+            config=persist_cfg, rng=rng,
             extra={
                 "games_generated": int(games_generated),
                 "steps_into_cycle": persist_into,
@@ -1244,15 +1298,18 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="exercise the FP16 (autocast) toggle")
     parser.add_argument("--grad-clip", type=float, default=None,
                         help=f"gradient-norm clip (default {DEFAULT_GRAD_CLIP})")
-    parser.add_argument("--human-mix", type=float, default=0.0,
+    parser.add_argument("--human-mix", type=float, default=None,
                         help="fraction of each training batch drawn from the "
                              "human data/pretrain chunk corpus (KataGo-style "
-                             "human-data mixing; default 0.0 = pure self-play, "
-                             "byte-identical to the pre-P11 behavior)")
-    parser.add_argument("--pretrain-data-dir", type=str,
-                        default=str(DEFAULT_PRETRAIN_DATA_DIR),
+                             "human-data mixing; default: auto -- restored "
+                             "from the checkpoint on --resume, else 0.0 = "
+                             "pure self-play, byte-identical to the pre-P11 "
+                             "behavior)")
+    parser.add_argument("--pretrain-data-dir", type=str, default=None,
                         help=f"human chunk corpus dir for --human-mix "
-                             f"(default {DEFAULT_PRETRAIN_DATA_DIR}; read-only)")
+                             f"(default: auto -- restored from the checkpoint "
+                             f"on --resume, else {DEFAULT_PRETRAIN_DATA_DIR}; "
+                             f"read-only)")
     parser.add_argument("--leaf-batch", type=int, default=None,
                         help="self-play leaves per network forward (default: "
                              "config leaf_batch=16; P11 speedup knob)")
@@ -1260,14 +1317,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="run self-play leaf inference under fp16 "
                              "autocast on CUDA (move numerics may shift "
                              "slightly but games stay legal)")
-    parser.add_argument("--selfplay-workers", type=int, default=1,
-                        help="parallel self-play worker processes (default 1 "
-                             "= today's per-game loop; 2-3 spawn child "
-                             "processes that each hold their own model copy "
-                             "+ MCTS so CPU cores parallelize the serial "
-                             "search phases and GPU forwards overlap -- "
-                             "per-move live viz is disabled; capped at 3 on "
-                             "the 6GB GPU, ~1.4GB fp16 per worker)")
+    parser.add_argument("--selfplay-workers", type=int, default=None,
+                        help="parallel self-play worker processes (default: "
+                             "auto -- restored from the checkpoint on "
+                             "--resume, else 1 = today's per-game loop; 2-3 "
+                             "spawn child processes that each hold their own "
+                             "model copy + MCTS so CPU cores parallelize the "
+                             "serial search phases and GPU forwards overlap "
+                             "-- per-move live viz is disabled; capped at 3 "
+                             "on the 6GB GPU, ~1.4GB fp16 per worker)")
     parser.add_argument("--seed", type=int, default=0,
                         help="master random seed (default 0)")
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
